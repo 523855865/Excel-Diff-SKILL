@@ -118,11 +118,39 @@ test('rejects values on null filters', async (t) => {
   await rejectsSpec(t, validSpec({ filters: [{ column: '状态', operator: 'isNotNull', values: [] }] }), /must not include value or values/);
 });
 
+test('rejects conflicting filter value fields', async (t) => {
+  await rejectsSpec(t, validSpec({ filters: [{ column: '状态', operator: 'eq', value: '在职', values: ['在职'] }] }), /must not include values/);
+  await rejectsSpec(t, validSpec({ filters: [{ column: '状态', operator: 'eq', values: ['在职'] }] }), /must not include values/);
+  await rejectsSpec(t, validSpec({ filters: [{ column: '状态', operator: 'in', value: ['在职'], values: ['离职'] }] }), /exactly one of value or values/);
+});
+
+test('rejects unknown properties in nested rule objects', async (t) => {
+  const cases = [
+    ['files item', (spec) => { spec.files[0].unexpected = true; }],
+    ['sheet', (spec) => { spec.sheet.unexpected = true; }],
+    ['mode', (spec) => { spec.mode.unexpected = true; }],
+    ['filter', (spec) => { spec.filters = [{ column: '状态', operator: 'eq', value: '在职', unexpected: true }]; }],
+    ['normalization column rule', (spec) => { spec.normalization = { columns: { 状态: { unexpected: true } } }; }],
+    ['output', (spec) => { spec.output.unexpected = true; }]
+  ];
+
+  for (const [name, mutate] of cases) {
+    const spec = validSpec();
+    mutate(spec);
+    await rejectsSpec(t, spec, /must NOT have additional properties/);
+  }
+});
+
 test('defaults sampleSize and optional collections', async (t) => {
   const spec = await loadSpec(await writeSpec(t, validSpec()));
 
   assert.equal(spec.output.sampleSize, 20);
   assert.deepEqual(spec.columnAliases, {});
   assert.deepEqual(spec.filters, []);
-  assert.deepEqual(spec.normalization, { columns: {} });
+  assert.deepEqual(spec.normalization, {
+    emptyEqualsNull: false,
+    caseSensitive: true,
+    formulaMode: 'formula-and-cached-result',
+    columns: {}
+  });
 });

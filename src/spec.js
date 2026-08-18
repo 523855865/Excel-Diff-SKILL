@@ -19,22 +19,28 @@ function invalid(message) {
 
 function validateFilters(filters) {
   for (const [index, filter] of filters.entries()) {
+    const hasValue = Object.hasOwn(filter, 'value');
+    const hasValues = Object.hasOwn(filter, 'values');
     if (filter.operator === 'isNull' || filter.operator === 'isNotNull') {
-      if (Object.hasOwn(filter, 'value') || Object.hasOwn(filter, 'values')) {
+      if (hasValue || hasValues) {
         throw invalid(`filters/${index}: ${filter.operator} must not include value or values`);
       }
       continue;
     }
-    const values = filter.values ?? filter.value;
     if (filter.operator === 'in' || filter.operator === 'notIn') {
+      if (hasValue === hasValues) throw invalid(`filters/${index}: ${filter.operator} requires exactly one of value or values`);
+      const values = hasValues ? filter.values : filter.value;
       if (!Array.isArray(values) || values.length === 0) throw invalid(`filters/${index}: ${filter.operator} requires at least one value`);
       continue;
     }
     if (filter.operator === 'between') {
+      if (hasValue === hasValues) throw invalid(`filters/${index}: between requires exactly one of value or values`);
+      const values = hasValues ? filter.values : filter.value;
       if (!Array.isArray(values) || values.length !== 2) throw invalid(`filters/${index}: between requires exactly two values`);
       continue;
     }
-    if (!Object.hasOwn(filter, 'value')) throw invalid(`filters/${index}: ${filter.operator} requires value`);
+    if (hasValues) throw invalid(`filters/${index}: ${filter.operator} must not include values`);
+    if (!hasValue) throw invalid(`filters/${index}: ${filter.operator} requires value`);
   }
 }
 
