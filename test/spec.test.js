@@ -101,6 +101,23 @@ test('rejects filters with missing or invalid value counts', async (t) => {
   await rejectsSpec(t, validSpec({ filters: [{ column: '日期', operator: 'between', values: ['2026-01-01'] }] }), /exactly two values/);
 });
 
+test('accepts arrays in value for membership and range filters', async (t) => {
+  const spec = await loadSpec(await writeSpec(t, validSpec({
+    filters: [
+      { column: '状态', operator: 'in', value: ['在职'] },
+      { column: '状态', operator: 'notIn', value: ['离职'] },
+      { column: '日期', operator: 'between', value: ['2026-01-01', '2026-12-31'] }
+    ]
+  })));
+
+  assert.equal(spec.filters.length, 3);
+});
+
+test('rejects values on null filters', async (t) => {
+  await rejectsSpec(t, validSpec({ filters: [{ column: '状态', operator: 'isNull', value: null }] }), /must not include value or values/);
+  await rejectsSpec(t, validSpec({ filters: [{ column: '状态', operator: 'isNotNull', values: [] }] }), /must not include value or values/);
+});
+
 test('defaults sampleSize and optional collections', async (t) => {
   const spec = await loadSpec(await writeSpec(t, validSpec()));
 

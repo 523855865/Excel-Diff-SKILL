@@ -19,13 +19,19 @@ function invalid(message) {
 
 function validateFilters(filters) {
   for (const [index, filter] of filters.entries()) {
-    if (filter.operator === 'isNull' || filter.operator === 'isNotNull') continue;
+    if (filter.operator === 'isNull' || filter.operator === 'isNotNull') {
+      if (Object.hasOwn(filter, 'value') || Object.hasOwn(filter, 'values')) {
+        throw invalid(`filters/${index}: ${filter.operator} must not include value or values`);
+      }
+      continue;
+    }
+    const values = filter.values ?? filter.value;
     if (filter.operator === 'in' || filter.operator === 'notIn') {
-      if (filter.values?.length === 0 || !filter.values) throw invalid(`filters/${index}: ${filter.operator} requires at least one value`);
+      if (!Array.isArray(values) || values.length === 0) throw invalid(`filters/${index}: ${filter.operator} requires at least one value`);
       continue;
     }
     if (filter.operator === 'between') {
-      if (filter.values?.length !== 2) throw invalid(`filters/${index}: between requires exactly two values`);
+      if (!Array.isArray(values) || values.length !== 2) throw invalid(`filters/${index}: between requires exactly two values`);
       continue;
     }
     if (!Object.hasOwn(filter, 'value')) throw invalid(`filters/${index}: ${filter.operator} requires value`);
