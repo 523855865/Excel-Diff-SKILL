@@ -6,6 +6,10 @@
   "bin": {
     "excel-diff": "src/cli.js"
   },
+  "files": [
+    "schemas",
+    "src"
+  ],
   "scripts": {
     "test": "node --test"
   },
