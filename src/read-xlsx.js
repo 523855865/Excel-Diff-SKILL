@@ -189,10 +189,18 @@ export async function readFileRows(file, spec, standardColumns = null) {
   for (let rowNumber = spec.sheet.headerRow + 1; rowNumber <= sheet.rowCount; rowNumber += 1) {
     totalRowsScanned += 1;
     const row = sheet.getRow(rowNumber);
-    const values = Object.fromEntries(columns.filter((column) => mapping.has(column)).map((column) => [
-      column,
-      normalizeValue(row.getCell(mapping.get(column)).value, ruleForColumn(spec, column))
-    ]));
+    const values = Object.fromEntries(columns.filter((column) => mapping.has(column)).map((column) => {
+      const cell = row.getCell(mapping.get(column));
+      const value = cell.value?.sharedFormula ? { ...cell.value, formula: cell.formula } : cell.value;
+      try {
+        return [column, normalizeValue(value, ruleForColumn(spec, column))];
+      } catch (error) {
+        if (error instanceof TypeError && error.message === 'unsupported cell value') {
+          throw new InputError('CELL_VALUE_UNSUPPORTED', `unsupported cell value in ${file.id} row ${rowNumber} column ${column}`);
+        }
+        throw error;
+      }
+    }));
     let matches = true;
     for (const filter of spec.filters) {
       try {

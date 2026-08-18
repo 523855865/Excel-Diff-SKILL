@@ -113,6 +113,13 @@ test('accepts arrays in value for membership and range filters', async (t) => {
   assert.equal(spec.filters.length, 3);
 });
 
+test('rejects non-scalar filter literals during spec loading', async (t) => {
+  await rejectsSpec(t, validSpec({ filters: [{ column: '状态', operator: 'eq', value: { status: '在职' } }] }), /must be/);
+  await rejectsSpec(t, validSpec({ filters: [{ column: '状态', operator: 'eq', value: ['在职'] }] }), /requires a scalar value/);
+  await rejectsSpec(t, validSpec({ filters: [{ column: '状态', operator: 'in', values: [{ status: '在职' }] }] }), /must be/);
+  await rejectsSpec(t, validSpec({ filters: [{ column: '日期', operator: 'between', value: ['2026-01-01', { end: '2026-12-31' }] }] }), /must be/);
+});
+
 test('rejects values on null filters', async (t) => {
   await rejectsSpec(t, validSpec({ filters: [{ column: '状态', operator: 'isNull', value: null }] }), /must not include value or values/);
   await rejectsSpec(t, validSpec({ filters: [{ column: '状态', operator: 'isNotNull', values: [] }] }), /must not include value or values/);

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import ExcelJS from 'exceljs';
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -169,4 +170,62 @@ test('honors selected columns, star columns, numeric tolerance, and typed compos
   const all = await compare({ ...base, compareColumns: '*' });
   assert.equal(all.summary.changedKeys, 4);
   assert.deepEqual(all.changed.map(({ column }) => column), ['忽略', '金额', '忽略', '忽略', '忽略']);
+});
+
+test('treats shared formula followers as their equivalent expanded formulas', async (t) => {
+  const directory = await makeTempDir();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const sharedPath = join(directory, 'shared.xlsx');
+  const plainPath = join(directory, 'plain.xlsx');
+
+  const shared = new ExcelJS.Workbook();
+  const sharedSheet = shared.addWorksheet('人员');
+  sharedSheet.addRow(['编号', '基础', '计算']);
+  sharedSheet.getCell('A2').value = '001';
+  sharedSheet.getCell('B2').value = { formula: 'A2+1', result: 2 };
+  sharedSheet.getCell('C2').value = { sharedFormula: 'B2', result: 3 };
+  await shared.xlsx.writeFile(sharedPath);
+
+  const plain = new ExcelJS.Workbook();
+  const plainSheet = plain.addWorksheet('人员');
+  plainSheet.addRow(['编号', '基础', '计算']);
+  plainSheet.getCell('A2').value = '001';
+  plainSheet.getCell('B2').value = { formula: 'A2+1', result: 2 };
+  plainSheet.getCell('C2').value = { formula: 'B2+1', result: 3 };
+  await plain.xlsx.writeFile(plainPath);
+
+  const result = await compare(spec(directory, [
+    { id: 'A', path: sharedPath },
+    { id: 'B', path: plainPath }
+  ], { filters: [], columnAliases: {} }));
+
+  assert.equal(result.summary.identicalKeys, 1);
+  assert.deepEqual(result.changed, []);
+});
+
+test('reports changed hyperlink text and targets from real XLSX cells', async (t) => {
+  const directory = await makeTempDir();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const paths = Object.fromEntries(['baseline', 'text', 'target'].map((id) => [id, join(directory, `${id}.xlsx`)]));
+  for (const [id, text, hyperlink] of [
+    ['baseline', 'Open', 'https://example.test/one'],
+    ['text', 'Closed', 'https://example.test/one'],
+    ['target', 'Open', 'https://example.test/two']
+  ]) {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('人员');
+    sheet.addRow(['编号', '链接']);
+    sheet.getCell('A2').value = '001';
+    sheet.getCell('B2').value = { text, hyperlink };
+    await workbook.xlsx.writeFile(paths[id]);
+  }
+
+  for (const id of ['text', 'target']) {
+    const result = await compare(spec(directory, [
+      { id: 'A', path: paths.baseline },
+      { id: 'B', path: paths[id] }
+    ], { filters: [], columnAliases: {} }));
+    assert.equal(result.summary.changedKeys, 1);
+    assert.deepEqual(result.changed.map(({ column }) => column), ['链接']);
+  }
 });

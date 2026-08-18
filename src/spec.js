@@ -41,6 +41,7 @@ function validateFilters(filters) {
     }
     if (hasValues) throw invalid(`filters/${index}: ${filter.operator} must not include values`);
     if (!hasValue) throw invalid(`filters/${index}: ${filter.operator} requires value`);
+    if (Array.isArray(filter.value)) throw invalid(`filters/${index}: ${filter.operator} requires a scalar value`);
   }
 }
 

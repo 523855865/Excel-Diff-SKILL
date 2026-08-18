@@ -33,7 +33,11 @@ test('normalizes supported scalar and ExcelJS cell values', () => {
   assert.deepEqual(normalizeValue(true), ['boolean', true]);
   assert.deepEqual(normalizeValue({ error: '#N/A' }), ['error', '#N/A']);
   assert.deepEqual(normalizeValue({ richText: [{ text: 'Hello' }, { text: ' world' }] }), ['string', 'Hello world']);
-  assert.deepEqual(normalizeValue({ foo: 'bar' }), ['string', '[object Object]']);
+  assert.deepEqual(
+    normalizeValue({ text: 'Open', hyperlink: 'https://example.test', tooltip: 'details' }),
+    ['hyperlink', { text: ['string', 'Open'], target: 'https://example.test', tooltip: 'details' }]
+  );
+  assert.throws(() => normalizeValue({ secret: 'do-not-leak' }), /unsupported cell value/);
 });
 
 test('normalizes formulas by all supported formula modes', () => {

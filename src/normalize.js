@@ -17,6 +17,14 @@ export function normalizeValue(value, rule = {}) {
   if (typeof value === 'object' && Array.isArray(value.richText)) {
     return normalizeValue(value.richText.map(({ text = '' }) => text).join(''), rule);
   }
+  if (typeof value === 'object' && typeof value.text === 'string' && typeof value.hyperlink === 'string'
+    && (value.tooltip == null || typeof value.tooltip === 'string')) {
+    return ['hyperlink', {
+      text: normalizeValue(value.text, rule),
+      target: value.hyperlink,
+      tooltip: value.tooltip ?? null
+    }];
+  }
   const formula = typeof value === 'object' && (typeof value.formula === 'string'
     ? value.formula
     : typeof value.sharedFormula === 'string' ? `shared:${value.sharedFormula}` : null);
@@ -26,6 +34,7 @@ export function normalizeValue(value, rule = {}) {
     if (rule.formulaMode === 'cached-result') return result;
     return ['formula', [formula, result]];
   }
+  if (typeof value === 'object') throw new TypeError('unsupported cell value');
   return ['string', String(value)];
 }
 

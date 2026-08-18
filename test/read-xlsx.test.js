@@ -238,7 +238,7 @@ test('reads formula cache values, shared formulas, and rich text from XLSX cells
   assert.deepEqual(result.rows[0].values, {
     编号: ['string', '001'],
     普通公式: ['formula', ['A2+1', ['number', 2]]],
-    共享公式: ['formula', ['shared:B2', ['number', 2]]],
+    共享公式: ['formula', ['B2+1', ['number', 2]]],
     富文本: ['string', 'Hello world']
   });
 });
@@ -299,4 +299,23 @@ test('wraps unreadable workbooks as INPUT_ERROR', async (t) => {
 
   await rejects(t, broken, spec(), { code: 'INPUT_ERROR', message: /broken/ });
   await rejects(t, { id: 'missing', path: join(directory, 'missing.xlsx') }, spec(), { code: 'INPUT_ERROR', message: /missing/ });
+});
+
+test('wraps unsupported cell values without leaking their contents', async (t) => {
+  const file = await fixture(t, [['编号', '姓名'], ['001', 'Alice']]);
+  const Xlsx = new ExcelJS.Workbook().xlsx.constructor;
+  const originalReadFile = Xlsx.prototype.readFile;
+  Xlsx.prototype.readFile = async function patchedReadFile(path) {
+    await originalReadFile.call(this, path);
+    this.workbook.getWorksheet('人员').getCell('B2').value = { secret: 'do-not-leak' };
+  };
+  t.after(() => { Xlsx.prototype.readFile = originalReadFile; });
+
+  await assert.rejects(
+    () => readFileRows(file, spec()),
+    (error) => error instanceof InputError
+      && error.code === 'CELL_VALUE_UNSUPPORTED'
+      && error.message === 'unsupported cell value in before row 2 column 姓名'
+      && !/do-not-leak|secret/.test(error.message)
+  );
 });
