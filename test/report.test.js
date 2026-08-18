@@ -105,7 +105,7 @@ test('writeReport writes deterministic CSV artifacts and a protected summary', a
       baselineRelation: 'ADDED'
     }]
   });
-  const originalOrder = result.changed.map((item) => [structuredClone(item.key), item.column]);
+  const originalResult = structuredClone(result);
 
   const report = await writeReport(reportSpec(directory), result);
   const [changedCsv, missingCsv, summaryText] = await Promise.all([
@@ -119,18 +119,18 @@ test('writeReport writes deterministic CSV artifacts and a protected summary', a
   assert.equal(report.directory, join(directory, report.summary.runId));
   assert.equal((await stat(report.directory)).isDirectory(), true);
   assert.deepEqual(parseCsv(changedCsv), [
-    ['key', 'sheet', 'column', 'B.value', 'B.row', 'A.value', 'A.row', 'C.value', 'C.row'],
-    [JSON.stringify([typed('string', 'a')]), 'Data', 'alpha', JSON.stringify(typed('number', 2)), '2', JSON.stringify(typed('number', 1)), '2', JSON.stringify(typed('number', 1)), '2'],
-    [JSON.stringify([typed('string', 'a')]), 'Data', 'zeta', JSON.stringify(typed('number', 2)), '2', JSON.stringify(typed('number', 1)), '2', JSON.stringify(typed('number', 1)), '2'],
-    [JSON.stringify([typed('string', 'z')]), 'Data', 'beta', JSON.stringify(typed('string', 'a,"b\nc')), '3', JSON.stringify(typed('formula', ['=SUM(A1:A2)', typed('number', 2)])), '4', JSON.stringify(typed('blank', null)), '5']
+    ['key', 'sheet', 'column', 'B.value', 'B.type', 'B.row', 'A.value', 'A.type', 'A.row', 'C.value', 'C.type', 'C.row'],
+    ['a', 'Data', 'alpha', '2', 'number', '2', '1', 'number', '2', '1', 'number', '2'],
+    ['a', 'Data', 'zeta', '2', 'number', '2', '1', 'number', '2', '1', 'number', '2'],
+    ['z', 'Data', 'beta', 'a,"b\nc', 'string', '3', JSON.stringify({ formula: '=SUM(A1:A2)', result: 2 }), 'formula', '4', '', 'blank', '5']
   ]);
-  assert.equal(missingCsv, 'key,sheet,presentFiles,missingFiles,baselineRelation\n"[[""string"",""has|pipe""]]",Data,"[""B|east"",""A""]","[""C|west""]",ADDED\n');
+  assert.equal(missingCsv, 'key,sheet,presentFiles,missingFiles,baselineRelation\nhas|pipe,Data,"[""B|east"",""A""]","[""C|west""]",ADDED\n');
   assert.equal(summary.status, 'COMPLETED');
   assert.equal(summary.runId, report.summary.runId);
   assert.deepEqual(summary.artifacts, { changed: 'changed.csv', missing: 'missing.csv' });
   assert.equal(summary.files, 3);
   assert.equal(summaryText.endsWith('\n'), true);
-  assert.deepEqual(result.changed.map((item) => [item.key, item.column]), originalOrder);
+  assert.deepEqual(result, originalResult);
 });
 
 test('writeReport preserves every typed value without spreadsheet formula activation', async (t) => {
@@ -149,9 +149,12 @@ test('writeReport preserves every typed value without spreadsheet formula activa
   }));
   const [, row] = parseCsv(await readFile(join(report.directory, 'changed.csv'), 'utf8'));
 
-  assert.deepEqual(row.filter((_, index) => index >= 3 && index % 2 === 1), values.map(JSON.stringify));
+  assert.deepEqual(
+    values.map((_, index) => [row[3 + index * 3], row[4 + index * 3]]),
+    [['', 'blank'], ['', 'string'], ['1', 'number'], ['1', 'string'], ['true', 'boolean'], ['true', 'string']]
+  );
 
-  const formula = typed('string', '=HYPERLINK("https://example.test","open")');
+  const formula = typed('formula', '=HYPERLINK("https://example.test","open")');
   const formulaReport = await writeReport(reportSpec(directory), reportResult({
     changed: [{
       key: [typed('string', 'formula')], sheetName: 'Data', column: 'value',
@@ -159,8 +162,63 @@ test('writeReport preserves every typed value without spreadsheet formula activa
     }]
   }));
   const formulaCell = parseCsv(await readFile(join(formulaReport.directory, 'changed.csv'), 'utf8'))[1][3];
-  assert.equal(formulaCell, JSON.stringify(formula));
+  assert.equal(formulaCell, `json:${JSON.stringify('=HYPERLINK("https://example.test","open")')}`);
   assert.equal(/^[=+\-@]/.test(formulaCell), false);
+});
+
+test('writeReport writes untyped composite keys and hyperlink payloads', async (t) => {
+  const directory = await makeTempDir();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const result = reportResult({
+    changed: [{
+      key: [typed('string', '001'), typed('number', 2)], sheetName: 'Data', column: 'link',
+      files: {
+        A: { value: typed('hyperlink', { text: typed('string', 'Open'), target: 'https://a.test', tooltip: null }), rowNumber: 2 },
+        B: { value: typed('hyperlink', { text: typed('string', 'Open'), target: 'https://b.test', tooltip: 'new' }), rowNumber: 2 }
+      }
+    }],
+    missing: [{
+      key: [typed('string', '001'), typed('number', 2)], sheetName: 'Data',
+      presentFiles: ['A'], missingFiles: ['B'], baselineRelation: 'DELETED'
+    }]
+  });
+  const report = await writeReport(reportSpec(directory, ['A', 'B']), result);
+  const [changed, missing] = await Promise.all([
+    readFile(join(report.directory, 'changed.csv'), 'utf8'),
+    readFile(join(report.directory, 'missing.csv'), 'utf8')
+  ]);
+
+  assert.deepEqual(parseCsv(changed)[1], [
+    JSON.stringify(['001', 2]), 'Data', 'link',
+    JSON.stringify({ text: 'Open', target: 'https://a.test', tooltip: null }), 'hyperlink', '2',
+    JSON.stringify({ text: 'Open', target: 'https://b.test', tooltip: 'new' }), 'hyperlink', '2'
+  ]);
+  assert.equal(parseCsv(missing)[1][0], JSON.stringify(['001', 2]));
+});
+
+test('writeReport protects direct keys and values from spreadsheet activation', async (t) => {
+  const directory = await makeTempDir();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const report = await writeReport(reportSpec(directory, ['A', 'B']), reportResult({
+    changed: [{
+      key: [typed('string', '=changed-key')], sheetName: 'Data', column: 'value',
+      files: {
+        A: { value: typed('string', '\t=changed-value'), rowNumber: 2 },
+        B: { value: typed('string', 'safe'), rowNumber: 2 }
+      }
+    }],
+    missing: [{
+      key: [typed('string', '\nmissing-key')], sheetName: 'Data',
+      presentFiles: ['A'], missingFiles: ['B'], baselineRelation: 'DELETED'
+    }]
+  }));
+  const [changedHeader, changedRow] = parseCsv(await readFile(join(report.directory, 'changed.csv'), 'utf8'));
+  const [, missingRow] = parseCsv(await readFile(join(report.directory, 'missing.csv'), 'utf8'));
+
+  assert.equal(changedRow[0], `json:${JSON.stringify('=changed-key')}`);
+  assert.equal(changedRow[3], `json:${JSON.stringify('\t=changed-value')}`);
+  assert.equal(missingRow[0], `json:${JSON.stringify('\nmissing-key')}`);
+  assert.equal(changedHeader.concat(changedRow, missingRow).some((value) => /^[=+\-@\t\r\n]/.test(value)), false);
 });
 
 test('writeReport safely and reversibly encodes controlled labels', async (t) => {
@@ -175,7 +233,11 @@ test('writeReport safely and reversibly encodes controlled labels', async (t) =>
   }));
   const [header, row] = parseCsv(await readFile(join(report.directory, 'changed.csv'), 'utf8'));
 
-  assert.deepEqual(header.slice(3), files.flatMap((id) => [`json:${JSON.stringify(`${id}.value`)}`, `json:${JSON.stringify(`${id}.row`)}`]));
+  assert.deepEqual(header.slice(3), files.flatMap((id) => [
+    `json:${JSON.stringify(`${id}.value`)}`,
+    `json:${JSON.stringify(`${id}.type`)}`,
+    `json:${JSON.stringify(`${id}.row`)}`
+  ]));
   assert.equal(row[1], `json:${JSON.stringify('=sheet')}`);
   assert.equal(row[2], `json:${JSON.stringify('+column')}`);
   assert.equal(header.concat(row).some((value) => /^[=+\-@]/.test(value)), false);
@@ -216,6 +278,6 @@ test('writeReport creates unique runs and writes header-only CSVs for empty deta
 
   assert.notEqual(first.summary.runId, second.summary.runId);
   assert.match(second.summary.runId, /^\d{8}T\d{6}Z-[0-9a-f]{8}$/);
-  assert.equal(await readFile(join(first.directory, 'changed.csv'), 'utf8'), 'key,sheet,column,B.value,B.row,A.value,A.row,C.value,C.row\n');
+  assert.equal(await readFile(join(first.directory, 'changed.csv'), 'utf8'), 'key,sheet,column,B.value,B.type,B.row,A.value,A.type,A.row,C.value,C.type,C.row\n');
   assert.equal(await readFile(join(first.directory, 'missing.csv'), 'utf8'), 'key,sheet,presentFiles,missingFiles,baselineRelation\n');
 });

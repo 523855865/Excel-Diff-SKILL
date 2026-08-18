@@ -34,10 +34,10 @@ node src/cli.js compare --spec /absolute/path/to/compare.json
 成功时标准输出仅有一行 JSON，包含汇总字段和本次绝对输出目录 `directory`。该目录包含：
 
 - `summary.json`：本次汇总；
-- `changed.csv`：字段差异；值单元格是 typed tuple 的 JSON，例如 `["number",12]`；
-- `missing.csv`：新增、删除的业务键。
+- `changed.csv`：字段差异；每个文件按 `<fileId>.value`、`<fileId>.type`、`<fileId>.row` 分列，值列不包含类型包装；
+- `missing.csv`：新增、删除的业务键；单字段 key 直接显示值，复合 key 显示不含类型包装的 JSON 数组。
 
-为防止 CSV 公式注入，危险的标签值会编码为 `json:<JSON string>`。
+为防止 CSV 公式注入，危险的标签、key 和值会编码为 `json:<JSON string>`。
 
 ## 范围与验证
 

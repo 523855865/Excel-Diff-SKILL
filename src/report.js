@@ -15,6 +15,24 @@ function safeText(text) {
   return /^(?:[=+\-@\t\r\n]|json:)/.test(text) ? `json:${JSON.stringify(text)}` : text;
 }
 
+function untypedValue([type, value]) {
+  if (type === 'blank') return '';
+  if (type === 'formula' && Array.isArray(value)) {
+    return { formula: value[0], result: untypedValue(value[1]) };
+  }
+  if (type === 'hyperlink') return { ...value, text: untypedValue(value.text) };
+  return value;
+}
+
+function safeValue(value) {
+  return safeText(value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value ?? ''));
+}
+
+function displayKey(key) {
+  const values = key.map(untypedValue);
+  return safeValue(values.length === 1 ? values[0] : values);
+}
+
 function runId() {
   return `${new Date().toISOString().replace(/\.\d{3}Z$/, 'Z').replace(/[-:]/g, '')}-${randomUUID().slice(0, 8)}`;
 }
@@ -30,16 +48,19 @@ export async function writeReport(spec, result) {
       || (left.column > right.column) - (left.column < right.column);
   });
   const changedRows = [
-    ['key', 'sheet', 'column', ...fileIds.flatMap((fileId) => [safeText(`${fileId}.value`), safeText(`${fileId}.row`)])],
+    ['key', 'sheet', 'column', ...fileIds.flatMap((fileId) => [safeText(`${fileId}.value`), safeText(`${fileId}.type`), safeText(`${fileId}.row`)])],
     ...changed.map((entry) => [
-      JSON.stringify(entry.key), safeText(entry.sheetName), safeText(entry.column),
-      ...fileIds.flatMap((fileId) => [JSON.stringify(entry.files[fileId].value), entry.files[fileId].rowNumber])
+      displayKey(entry.key), safeText(entry.sheetName), safeText(entry.column),
+      ...fileIds.flatMap((fileId) => {
+        const value = entry.files[fileId].value;
+        return [safeValue(untypedValue(value)), safeText(value[0]), entry.files[fileId].rowNumber];
+      })
     ])
   ];
   const missingRows = [
     ['key', 'sheet', 'presentFiles', 'missingFiles', 'baselineRelation'],
     ...result.missing.map((entry) => [
-      JSON.stringify(entry.key), safeText(entry.sheetName), JSON.stringify(entry.presentFiles), JSON.stringify(entry.missingFiles), entry.baselineRelation
+      displayKey(entry.key), safeText(entry.sheetName), JSON.stringify(entry.presentFiles), JSON.stringify(entry.missingFiles), entry.baselineRelation
     ])
   ];
   const summary = {
