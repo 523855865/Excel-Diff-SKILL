@@ -181,6 +181,31 @@ test('writeReport safely and reversibly encodes controlled labels', async (t) =>
   assert.equal(header.concat(row).some((value) => /^[=+\-@]/.test(value)), false);
 });
 
+test('writeReport covers tab and line-break CSV injection prefixes in every label', async (t) => {
+  const directory = await makeTempDir();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const files = ['\n@file', 'A'];
+  const report = await writeReport(reportSpec(directory, files), reportResult({
+    changed: [{
+      key: [typed('string', 'changed')], sheetName: '\t=changed', column: '\r=column',
+      files: Object.fromEntries(files.map((id) => [id, { value: typed('number', 1), rowNumber: 2 }]))
+    }],
+    missing: [{
+      key: [typed('string', 'missing')], sheetName: '=missing',
+      presentFiles: ['A'], missingFiles: ['\n@file'], baselineRelation: 'DELETED'
+    }]
+  }));
+  const [changedHeader, changedRow] = parseCsv(await readFile(join(report.directory, 'changed.csv'), 'utf8'));
+  const [, missingRow] = parseCsv(await readFile(join(report.directory, 'missing.csv'), 'utf8'));
+  const decodeSafe = (value) => JSON.parse(value.slice('json:'.length));
+
+  assert.equal(changedHeader.concat(changedRow, missingRow).some((value) => /^[=+\-@\t\r\n]/.test(value)), false);
+  assert.equal(decodeSafe(changedHeader[3]), '\n@file.value');
+  assert.equal(decodeSafe(changedRow[1]), '\t=changed');
+  assert.equal(decodeSafe(changedRow[2]), '\r=column');
+  assert.equal(decodeSafe(missingRow[1]), '=missing');
+});
+
 test('writeReport creates unique runs and writes header-only CSVs for empty details', async (t) => {
   const directory = await makeTempDir();
   t.after(() => rm(directory, { recursive: true, force: true }));

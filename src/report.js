@@ -12,7 +12,7 @@ function csv(rows) {
 }
 
 function safeText(text) {
-  return /^[=+\-@]|^json:/.test(text) ? `json:${JSON.stringify(text)}` : text;
+  return /^(?:[=+\-@\t\r\n]|json:)/.test(text) ? `json:${JSON.stringify(text)}` : text;
 }
 
 function runId() {
@@ -39,7 +39,7 @@ export async function writeReport(spec, result) {
   const missingRows = [
     ['key', 'sheet', 'presentFiles', 'missingFiles', 'baselineRelation'],
     ...result.missing.map((entry) => [
-      JSON.stringify(entry.key), entry.sheetName, JSON.stringify(entry.presentFiles), JSON.stringify(entry.missingFiles), entry.baselineRelation
+      JSON.stringify(entry.key), safeText(entry.sheetName), JSON.stringify(entry.presentFiles), JSON.stringify(entry.missingFiles), entry.baselineRelation
     ])
   ];
   const summary = {
