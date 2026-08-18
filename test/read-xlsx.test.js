@@ -192,6 +192,18 @@ test('uses canonical aliases when building baseline star columns', async (t) => 
   assert.deepEqual(result.rows[0].values, { 编号: ['string', '001'], 姓名: ['string', 'Alice'] });
 });
 
+test('canonicalizes baseline alias columns before mapping later star workbooks', async (t) => {
+  const rules = spec({ columnAliases: { 姓名: ['Name'] } });
+  const baseline = await fixture(t, [['编号', 'Name'], ['001', 'Alice']]);
+  const first = await readFileRows(baseline, rules);
+  const later = await fixture(t, [['编号', '姓名'], ['001', 'Alice']]);
+
+  const result = await readFileRows(later, rules, first.columns);
+
+  assert.deepEqual(first.columns, ['编号', '姓名']);
+  assert.deepEqual(result.rows[0].values, { 编号: ['string', '001'], 姓名: ['string', 'Alice'] });
+});
+
 test('reads formula cache values, shared formulas, and rich text from XLSX cells', async (t) => {
   const directory = await makeTempDir();
   t.after(() => rm(directory, { recursive: true, force: true }));

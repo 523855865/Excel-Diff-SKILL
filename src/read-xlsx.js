@@ -163,7 +163,7 @@ export async function readFileRows(file, spec, standardColumns = null) {
   let columns;
   let mapping;
   if (standardColumns === null && spec.compareColumns === '*') {
-    mapping = mapColumns(headers, required, aliases);
+    mapping = mapColumns(headers, [...new Set([...required, ...Object.keys(aliases)])], aliases);
     for (const column of required) {
       if (!mapping.has(column)) throw new InputError('COLUMN_MISSING', `column ${column} is missing from ${file.id}`);
     }
