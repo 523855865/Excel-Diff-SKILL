@@ -8,7 +8,10 @@ export function normalizeValue(value, rule = {}) {
     if (rule.caseSensitive === false) text = text.toLowerCase();
     return ['string', text];
   }
-  if (typeof value === 'number') return ['number', Object.is(value, -0) ? 0 : value];
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new TypeError('number must be finite');
+    return ['number', Object.is(value, -0) ? 0 : value];
+  }
   if (typeof value === 'boolean') return ['boolean', value];
   if (typeof value === 'object' && typeof value.error === 'string') return ['error', value.error];
   if (typeof value === 'object' && Array.isArray(value.richText)) {

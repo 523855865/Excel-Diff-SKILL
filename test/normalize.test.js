@@ -56,6 +56,12 @@ test('normalizes negative zero deterministically', () => {
   assert.equal(encodeKey([negativeZero]), encodeKey([zero]));
 });
 
+test('rejects non-finite numbers', () => {
+  assert.throws(() => normalizeValue(NaN), TypeError);
+  assert.throws(() => normalizeValue(Infinity), TypeError);
+  assert.throws(() => normalizeValue(-Infinity), TypeError);
+});
+
 test('uses numeric tolerance only between numeric values', () => {
   assert.equal(equalValues(['number', 1], ['number', 1.5], { numericTolerance: 0.5 }), true);
   assert.equal(equalValues(['number', 1], ['number', 1.5], { numericTolerance: 0.499 }), false);
