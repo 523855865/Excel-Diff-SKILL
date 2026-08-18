@@ -104,19 +104,26 @@ test('aggregates typed keys, classifies rows, and preserves file and field order
   assert.deepEqual(Object.keys(result.changed[1].files), ['C', 'A', 'B']);
 });
 
-test('fails without exposing rows when duplicate-key policy is fail', async (t) => {
+test('redacts sensitive duplicate keys and classifies duplicates before missing rows', async (t) => {
   const { directory, files } = await filesFor(t, {
-    A: [['编号', '状态'], ['1', '在职']],
-    B: [['编号', '状态'], ['1', '在职'], ['1', '在职']],
-    C: [['编号', '状态'], ['1', '在职']]
+    A: [['编号', '备注'], ['SECRET-EMP-001', 'TOP-SECRET-ROW']],
+    B: [['编号', '备注'], ['SECRET-EMP-001', 'TOP-SECRET-ROW'], ['SECRET-EMP-001', 'TOP-SECRET-ROW']],
+    C: [['编号', '备注']]
   });
+  const rules = spec(directory, files, { filters: [] });
+  const reported = await compare(rules);
+
+  assert.equal(reported.summary.duplicateKeys, 1);
+  assert.equal(reported.summary.missingKeys, 0);
+  assert.deepEqual(reported.duplicates, [{ key: [['string', 'SECRET-EMP-001']], files: ['B'] }]);
 
   await assert.rejects(
-    () => compare(spec(directory, files, { duplicateKeyPolicy: 'fail' })),
+    () => compare({ ...rules, duplicateKeyPolicy: 'fail' }),
     (error) => error instanceof CompareError
       && error.code === 'DUPLICATE_KEY'
       && /B/.test(error.message)
-      && !/rowNumber|在职/.test(error.message)
+      && /keyHash=sha256:[0-9a-f]{64}/.test(error.message)
+      && !/SECRET-EMP-001|TOP-SECRET-ROW|rowNumber/.test(error.message)
   );
 });
 

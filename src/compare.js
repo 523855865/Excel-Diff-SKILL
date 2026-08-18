@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { equalValues, encodeKey } from './normalize.js';
 import { readFileRows } from './read-xlsx.js';
 
@@ -61,7 +63,8 @@ export async function compare(spec) {
       .map(({ id }) => id);
     if (duplicateFiles.length > 0) {
       if (spec.duplicateKeyPolicy === 'fail') {
-        throw new CompareError('DUPLICATE_KEY', `duplicate business key ${encodeKey(entry.key)} in files ${duplicateFiles.join(', ')}`);
+        const keyHash = createHash('sha256').update(encodeKey(entry.key)).digest('hex');
+        throw new CompareError('DUPLICATE_KEY', `duplicate business keyHash=sha256:${keyHash} in files ${duplicateFiles.join(', ')}`);
       }
       duplicates.push({ key: entry.key, files: duplicateFiles });
       continue;
