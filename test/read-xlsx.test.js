@@ -137,6 +137,17 @@ test('requires key, explicit compare, and filter columns', async (t) => {
   await rejects(t, file, spec({ filters: [{ column: '状态', operator: 'eq', value: '在职' }] }), { code: 'COLUMN_MISSING', message: /状态/ });
 });
 
+test('requires key columns to exist in the workbook', async (t) => {
+  const file = await fixture(t, [['姓名'], ['Alice']]);
+
+  await rejects(
+    t,
+    file,
+    spec({ mode: { keyColumns: ['工号'] } }),
+    { code: 'COLUMN_MISSING', message: /before.*工号|工号.*before/ }
+  );
+});
+
 test('maps later NFKC and alias headers to baseline standard columns', async (t) => {
   const baseline = await fixture(t, [['编号', '姓名', 'ABC'], ['001', 'Alice', 'x']]);
   const rules = spec({ columnAliases: { 姓名: ['Name'] } });
