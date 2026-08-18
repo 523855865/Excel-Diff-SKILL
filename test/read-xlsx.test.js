@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import ExcelJS from 'exceljs';
 import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -167,6 +168,50 @@ test('maps later NFKC and alias headers to baseline standard columns', async (t)
     编号: ['string', '001'],
     姓名: ['string', 'Alice'],
     ABC: ['string', 'x']
+  });
+});
+
+test('resolves exact columns before shared aliases', async (t) => {
+  const file = await fixture(t, [['编号', 'ID'], ['001', 'X']]);
+
+  const result = await readFileRows(
+    file,
+    spec({ columnAliases: { 编号: ['ID'], 代码: ['ID'] } }),
+    ['编号', '代码']
+  );
+
+  assert.deepEqual(result.rows[0].values, { 编号: ['string', '001'], 代码: ['string', 'X'] });
+});
+
+test('uses canonical aliases when building baseline star columns', async (t) => {
+  const file = await fixture(t, [['ID', '姓名'], ['001', 'Alice']]);
+
+  const result = await readFileRows(file, spec({ columnAliases: { 编号: ['ID'] } }));
+
+  assert.deepEqual(result.columns, ['编号', '姓名']);
+  assert.deepEqual(result.rows[0].values, { 编号: ['string', '001'], 姓名: ['string', 'Alice'] });
+});
+
+test('reads formula cache values, shared formulas, and rich text from XLSX cells', async (t) => {
+  const directory = await makeTempDir();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = { id: 'before', path: join(directory, 'values.xlsx') };
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('人员');
+  sheet.addRow(['编号', '普通公式', '共享公式', '富文本']);
+  sheet.getCell('A2').value = '001';
+  sheet.getCell('B2').value = { formula: 'A2+1', result: 2 };
+  sheet.getCell('C2').value = { sharedFormula: 'B2', result: 2 };
+  sheet.getCell('D2').value = { richText: [{ text: 'Hello' }, { text: ' world' }] };
+  await workbook.xlsx.writeFile(file.path);
+
+  const result = await readFileRows(file, spec());
+
+  assert.deepEqual(result.rows[0].values, {
+    编号: ['string', '001'],
+    普通公式: ['formula', ['A2+1', ['number', 2]]],
+    共享公式: ['formula', ['shared:B2', ['number', 2]]],
+    富文本: ['string', 'Hello world']
   });
 });
 
