@@ -42,6 +42,18 @@ test('normalizes formulas by all supported formula modes', () => {
   assert.deepEqual(normalizeValue(value, { formulaMode: 'cached-result' }), ['number', 2]);
   assert.deepEqual(normalizeValue(value, { formulaMode: 'formula-and-cached-result' }), ['formula', ['A1+1', ['number', 2]]]);
   assert.deepEqual(normalizeValue(value), ['formula', ['A1+1', ['number', 2]]]);
+  const shared = { sharedFormula: 'A1', result: 2 };
+  assert.deepEqual(normalizeValue(shared, { formulaMode: 'formula' }), ['formula', 'shared:A1']);
+  assert.deepEqual(normalizeValue(shared, { formulaMode: 'cached-result' }), ['number', 2]);
+  assert.deepEqual(normalizeValue(shared), ['formula', ['shared:A1', ['number', 2]]]);
+});
+
+test('normalizes negative zero deterministically', () => {
+  const negativeZero = normalizeValue(-0);
+  const zero = normalizeValue(0);
+  assert.deepEqual(negativeZero, ['number', 0]);
+  assert.equal(equalValues(negativeZero, zero), true);
+  assert.equal(encodeKey([negativeZero]), encodeKey([zero]));
 });
 
 test('uses numeric tolerance only between numeric values', () => {
@@ -93,14 +105,21 @@ test('matches string operators only for strings', () => {
 });
 
 test('matches ISO date literals against date cells', () => {
+  const cell = ['date', '2026-01-02T00:00:00.000Z'];
   assert.equal(
-    matchesFilter(['date', '2026-01-02T00:00:00.000Z'], { operator: 'gte', value: '2026-01-01T00:00:00.000Z' }),
+    matchesFilter(cell, { operator: 'gte', value: '2026-01-01T00:00:00.000Z' }),
     true
   );
   assert.equal(
-    matchesFilter(['date', '2026-01-02T00:00:00.000Z'], { operator: 'between', values: ['2026-01-02T00:00:00.000Z', '2026-01-03T00:00:00.000Z'] }),
+    matchesFilter(cell, { operator: 'gte', value: '2026-01-02' }),
     true
   );
+  assert.equal(
+    matchesFilter(cell, { operator: 'between', values: ['2026-01-02T00:00:00.000Z', '2026-01-03T00:00:00.000Z'] }),
+    true
+  );
+  assert.throws(() => matchesFilter(cell, { operator: 'gte', value: '2026-01-02T00:00:00' }), TypeError);
+  assert.throws(() => matchesFilter(cell, { operator: 'gte', value: '2026-02-30T00:00:00Z' }), TypeError);
 });
 
 test('prints blank, scalar, formula, and object values safely', () => {

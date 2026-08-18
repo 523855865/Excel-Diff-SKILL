@@ -8,17 +8,20 @@ export function normalizeValue(value, rule = {}) {
     if (rule.caseSensitive === false) text = text.toLowerCase();
     return ['string', text];
   }
-  if (typeof value === 'number') return ['number', value];
+  if (typeof value === 'number') return ['number', Object.is(value, -0) ? 0 : value];
   if (typeof value === 'boolean') return ['boolean', value];
   if (typeof value === 'object' && typeof value.error === 'string') return ['error', value.error];
   if (typeof value === 'object' && Array.isArray(value.richText)) {
     return normalizeValue(value.richText.map(({ text = '' }) => text).join(''), rule);
   }
-  if (typeof value === 'object' && typeof value.formula === 'string') {
-    if (rule.formulaMode === 'formula') return ['formula', value.formula];
+  const formula = typeof value === 'object' && (typeof value.formula === 'string'
+    ? value.formula
+    : typeof value.sharedFormula === 'string' ? `shared:${value.sharedFormula}` : null);
+  if (formula !== null) {
+    if (rule.formulaMode === 'formula') return ['formula', formula];
     const result = normalizeValue(value.result, rule);
     if (rule.formulaMode === 'cached-result') return result;
-    return ['formula', [value.formula, result]];
+    return ['formula', [formula, result]];
   }
   return ['string', String(value)];
 }
@@ -34,11 +37,32 @@ export function encodeKey(values) {
   return JSON.stringify(values);
 }
 
-function normalizeFilterValue(value, cellType, rule) {
-  if (cellType === 'date' && typeof value === 'string') {
-    const date = new Date(value);
-    if (!Number.isNaN(date.valueOf())) return normalizeValue(date, rule);
+function dateLiteral(value) {
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  const datetime = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-](\d{2}):(\d{2}))$/.exec(value);
+  const parts = dateOnly || datetime;
+  const invalid = () => { throw new TypeError(`invalid ISO date literal: ${value}`); };
+  if (!parts) invalid();
+
+  const [year, month, day] = parts.slice(1, 4).map(Number);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (month < 1 || month > 12 || day < 1 || day > days[month - 1]) invalid();
+  if (datetime) {
+    const hour = Number(datetime[4]);
+    const minute = Number(datetime[5]);
+    const second = datetime[6] === undefined ? 0 : Number(datetime[6]);
+    const offsetHour = datetime[9] === undefined ? 0 : Number(datetime[9]);
+    const offsetMinute = datetime[10] === undefined ? 0 : Number(datetime[10]);
+    if (hour > 23 || minute > 59 || second > 59 || offsetHour > 23 || offsetMinute > 59) invalid();
   }
+  const date = new Date(dateOnly ? `${value}T00:00:00.000Z` : value);
+  if (Number.isNaN(date.valueOf())) invalid();
+  return date.toISOString();
+}
+
+function normalizeFilterValue(value, cellType, rule) {
+  if (cellType === 'date' && typeof value === 'string') return ['date', dateLiteral(value)];
   return normalizeValue(value, rule);
 }
 
@@ -54,15 +78,36 @@ export function matchesFilter(value, filter, rule = {}) {
   switch (filter.operator) {
     case 'eq': return equalValues(cell, literal(values), rule);
     case 'ne': return !equalValues(cell, literal(values), rule);
-    case 'gt': return comparable(cell, literal(values)) && cell[1] > literal(values)[1];
-    case 'gte': return comparable(cell, literal(values)) && cell[1] >= literal(values)[1];
-    case 'lt': return comparable(cell, literal(values)) && cell[1] < literal(values)[1];
-    case 'lte': return comparable(cell, literal(values)) && cell[1] <= literal(values)[1];
+    case 'gt': {
+      const operand = literal(values);
+      return comparable(cell, operand) && cell[1] > operand[1];
+    }
+    case 'gte': {
+      const operand = literal(values);
+      return comparable(cell, operand) && cell[1] >= operand[1];
+    }
+    case 'lt': {
+      const operand = literal(values);
+      return comparable(cell, operand) && cell[1] < operand[1];
+    }
+    case 'lte': {
+      const operand = literal(values);
+      return comparable(cell, operand) && cell[1] <= operand[1];
+    }
     case 'in': return values.some((item) => equalValues(cell, literal(item), rule));
     case 'notIn': return values.every((item) => !equalValues(cell, literal(item), rule));
-    case 'contains': return cell[0] === 'string' && literal(values)[0] === 'string' && cell[1].includes(literal(values)[1]);
-    case 'startsWith': return cell[0] === 'string' && literal(values)[0] === 'string' && cell[1].startsWith(literal(values)[1]);
-    case 'endsWith': return cell[0] === 'string' && literal(values)[0] === 'string' && cell[1].endsWith(literal(values)[1]);
+    case 'contains': {
+      const operand = literal(values);
+      return cell[0] === 'string' && operand[0] === 'string' && cell[1].includes(operand[1]);
+    }
+    case 'startsWith': {
+      const operand = literal(values);
+      return cell[0] === 'string' && operand[0] === 'string' && cell[1].startsWith(operand[1]);
+    }
+    case 'endsWith': {
+      const operand = literal(values);
+      return cell[0] === 'string' && operand[0] === 'string' && cell[1].endsWith(operand[1]);
+    }
     case 'isNull': return cell[0] === 'blank';
     case 'isNotNull': return cell[0] !== 'blank';
     case 'between': {
