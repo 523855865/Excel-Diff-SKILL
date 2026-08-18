@@ -2,8 +2,6 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { printValue } from './normalize.js';
-
 export function csvCell(value) {
   const text = value == null ? '' : String(value);
   return /[,"\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
@@ -11,6 +9,10 @@ export function csvCell(value) {
 
 function csv(rows) {
   return `${rows.map((row) => row.map(csvCell).join(',')).join('\n')}\n`;
+}
+
+function safeText(text) {
+  return /^[=+\-@]|^json:/.test(text) ? `json:${JSON.stringify(text)}` : text;
 }
 
 function runId() {
@@ -28,10 +30,10 @@ export async function writeReport(spec, result) {
       || (left.column > right.column) - (left.column < right.column);
   });
   const changedRows = [
-    ['key', 'sheet', 'column', ...fileIds.flatMap((fileId) => [`${fileId}.value`, `${fileId}.row`])],
+    ['key', 'sheet', 'column', ...fileIds.flatMap((fileId) => [safeText(`${fileId}.value`), safeText(`${fileId}.row`)])],
     ...changed.map((entry) => [
-      JSON.stringify(entry.key), entry.sheetName, entry.column,
-      ...fileIds.flatMap((fileId) => [printValue(entry.files[fileId].value), entry.files[fileId].rowNumber])
+      JSON.stringify(entry.key), safeText(entry.sheetName), safeText(entry.column),
+      ...fileIds.flatMap((fileId) => [JSON.stringify(entry.files[fileId].value), entry.files[fileId].rowNumber])
     ])
   ];
   const missingRows = [
