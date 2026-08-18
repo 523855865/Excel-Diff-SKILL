@@ -193,7 +193,17 @@ export async function readFileRows(file, spec, standardColumns = null) {
       column,
       normalizeValue(row.getCell(mapping.get(column)).value, ruleForColumn(spec, column))
     ]));
-    if (!spec.filters.every((filter) => matchesFilter(values[filter.column], filter, ruleForColumn(spec, filter.column)))) continue;
+    let matches = true;
+    for (const filter of spec.filters) {
+      try {
+        if (!matchesFilter(values[filter.column], filter, ruleForColumn(spec, filter.column))) matches = false;
+      } catch (error) {
+        if (error instanceof TypeError) throw new InputError('FILTER_INVALID', `invalid filter for column ${filter.column}`);
+        throw error;
+      }
+      if (!matches) break;
+    }
+    if (!matches) continue;
     if (spec.mode.keyColumns.some((column) => values[column]?.[0] === 'blank')) {
       invalidRows += 1;
       continue;

@@ -85,6 +85,22 @@ test('filters normalized strings, numbers, and dates while retaining scan counts
   assert.deepEqual(result.rows[0].values.日期, ['date', '2026-01-02T00:00:00.000Z']);
 });
 
+test('wraps invalid date filters without leaking filter or cell values', async (t) => {
+  const file = await fixture(t, [
+    ['编号', '日期'],
+    ['001', new Date('2026-01-02T00:00:00.000Z')]
+  ]);
+  const rules = spec({ filters: [{ column: '日期', operator: 'eq', value: '2026-02-30T00:00:00Z' }] });
+
+  await assert.rejects(
+    () => readFileRows(file, rules),
+    (error) => error instanceof InputError
+      && error.code === 'FILTER_INVALID'
+      && error.message === 'invalid filter for column 日期'
+      && !/2026-02-30|2026-01-02|001/.test(error.message)
+  );
+});
+
 test('counts blank typed keys as invalid and leaves source order unchanged', async (t) => {
   const file = await fixture(t, [
     ['编号', '姓名'],

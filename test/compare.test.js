@@ -121,9 +121,8 @@ test('redacts sensitive duplicate keys and classifies duplicates before missing 
     () => compare({ ...rules, duplicateKeyPolicy: 'fail' }),
     (error) => error instanceof CompareError
       && error.code === 'DUPLICATE_KEY'
-      && /B/.test(error.message)
-      && /keyHash=sha256:[0-9a-f]{64}/.test(error.message)
-      && !/SECRET-EMP-001|TOP-SECRET-ROW|rowNumber/.test(error.message)
+      && error.message === 'duplicate business key in files B'
+      && !/SECRET-EMP-001|TOP-SECRET-ROW|rowNumber|keyHash|16afa22382763eb45d4fec1255adf423335f2c27eda4ae209aec53237b1ccbf1/.test(error.message)
   );
 });
 
