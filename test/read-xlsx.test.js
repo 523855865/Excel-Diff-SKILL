@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
 import ExcelJS from 'exceljs';
 import { rm, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import test from 'node:test';
+import unzipper from 'unzipper';
 
 import { makeTempDir, writeWorkbook } from './helpers.js';
 import { InputError, readFileRows, scanFileRows } from '../src/read-xlsx.js';
+
+const require = createRequire(import.meta.url);
+const tmp = require('tmp');
 
 function spec(overrides = {}) {
   return {
@@ -38,6 +43,11 @@ async function rejects(t, file, rules, expected, columns = null) {
     (error) => error instanceof InputError && error.code === expected.code && expected.message.test(error.message)
   );
 }
+
+test('loads the ExcelJS 4.4 streaming compatibility boundary', async () => {
+  const compatibility = await import('../src/exceljs-stream-compat.js');
+  assert.equal(typeof compatibility.openStreamingWorkbook, 'function');
+});
 
 test('reads typed values with Excel provenance and physical row counts', async (t) => {
   const file = await fixture(t, [
@@ -164,6 +174,53 @@ test('streams 2,000 real XLSX rows through awaited callbacks without returning r
   assert.deepEqual(records[1].values.姓名, ['string', '员工2000']);
 });
 
+test('propagates callback errors exactly and stops before later rows', async (t) => {
+  const file = await fixture(t, [
+    ['编号'],
+    ['001'],
+    ['002'],
+    ['003']
+  ]);
+  const sentinel = new Error('stop scanning');
+  const seen = [];
+
+  await assert.rejects(
+    () => scanFileRows(file, spec(), null, async (record) => {
+      seen.push(record.rowNumber);
+      if (record.rowNumber === 3) throw sentinel;
+    }),
+    (error) => error === sentinel
+  );
+  assert.deepEqual(seen, [2, 3]);
+});
+
+test('releases formula metadata for rows before the header', async (t) => {
+  const directory = await makeTempDir();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = { id: 'before', path: join(directory, 'pre-header-formulas.xlsx') };
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('人员');
+  sheet.getCell('B1').value = { formula: '1=1', result: true };
+  sheet.getCell('C1').value = { formula: '1/0', result: { error: '#DIV/0!' } };
+  sheet.addRow(['编号', '姓名']);
+  sheet.addRow(['001', 'Alice']);
+  await workbook.xlsx.writeFile(file.path);
+
+  let released = false;
+  const deleteMapEntry = Map.prototype.delete;
+  Map.prototype.delete = function deleteWithProbe(key) {
+    const pending = this.get(key);
+    if (key === 1 && pending instanceof Map && pending.has('B1') && pending.has('C1')) released = true;
+    return deleteMapEntry.call(this, key);
+  };
+  try {
+    await scanFileRows(file, spec({ sheet: { name: '人员', headerRow: 2 } }));
+  } finally {
+    Map.prototype.delete = deleteMapEntry;
+  }
+  assert.equal(released, true);
+});
+
 test('streams ExcelJS workbooks whose worksheet entry precedes workbook metadata', async (t) => {
   const file = await fixture(t, [
     ['编号', '日期'],
@@ -173,6 +230,33 @@ test('streams ExcelJS workbooks whose worksheet entry precedes workbook metadata
   const result = await readFileRows(file, spec());
 
   assert.deepEqual(result.rows[0].values.日期, ['date', '2026-01-02T00:00:00.000Z']);
+});
+
+test('streams inline strings without temporary worksheet spooling', async (t) => {
+  const directory = await makeTempDir();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = { id: 'before', path: join(directory, 'inline-strings.xlsx') };
+  const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({ filename: file.path, useSharedStrings: false });
+  const sheet = workbook.addWorksheet('人员');
+  sheet.addRow(['编号', '姓名']).commit();
+  sheet.addRow(['001', 'Alice']).commit();
+  sheet.commit();
+  await workbook.commit();
+
+  const archive = await unzipper.Open.file(file.path);
+  const paths = archive.files.map(({ path }) => path);
+  assert.equal(paths.includes('xl/sharedStrings.xml'), false);
+  assert.ok(paths.indexOf('xl/worksheets/sheet1.xml') < paths.indexOf('xl/workbook.xml'));
+
+  const originalTmpFile = tmp.file;
+  tmp.file = () => { throw new Error('unexpected worksheet temp spool'); };
+  try {
+    const result = await scanFileRows(file, spec());
+    assert.equal(result.matchedRows, 1);
+    assert.deepEqual(result.columns, ['编号', '姓名']);
+  } finally {
+    tmp.file = originalTmpFile;
+  }
 });
 
 test('reports absent sheets with available sheet names', async (t) => {
@@ -329,6 +413,70 @@ test('normalizes cached formula dates in every formula mode', async (t) => {
     const result = await readFileRows(file, rules);
     assert.deepEqual(result.rows[0].values.日期公式, expected);
   }
+});
+
+test('normalizes cached formula booleans and errors in every formula mode', async (t) => {
+  const directory = await makeTempDir();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = { id: 'before', path: join(directory, 'formula-types.xlsx') };
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('人员');
+  sheet.addRow(['编号', '布尔公式', '错误公式', '共享布尔公式']);
+  sheet.addRow(['001']);
+  sheet.addRow(['002']);
+  sheet.getCell('B2').value = { formula: '1=1', result: true };
+  sheet.getCell('B3').value = { formula: '1=0', result: false };
+  sheet.getCell('C2').value = { formula: '1/0', result: { error: '#DIV/0!' } };
+  sheet.getCell('C3').value = { formula: 'NA()', result: { error: '#N/A' } };
+  sheet.fillFormula('D2:D3', 'A2<>""', [true, false]);
+  await workbook.xlsx.writeFile(file.path);
+
+  for (const [formulaMode, expected] of [
+    ['formula', {
+      布尔公式: ['formula', '1=0'],
+      错误公式: ['formula', 'NA()'],
+      共享布尔公式: ['formula', 'A3<>""']
+    }],
+    ['cached-result', {
+      布尔公式: ['boolean', false],
+      错误公式: ['error', '#N/A'],
+      共享布尔公式: ['boolean', false]
+    }],
+    ['formula-and-cached-result', {
+      布尔公式: ['formula', ['1=0', ['boolean', false]]],
+      错误公式: ['formula', ['NA()', ['error', '#N/A']]],
+      共享布尔公式: ['formula', ['A3<>""', ['boolean', false]]]
+    }]
+  ]) {
+    const rules = spec({ normalization: { columns: {}, formulaMode } });
+    const result = await readFileRows(file, rules);
+    const values = result.rows[1].values;
+    assert.deepEqual({
+      布尔公式: values.布尔公式,
+      错误公式: values.错误公式,
+      共享布尔公式: values.共享布尔公式
+    }, expected);
+  }
+});
+
+test('preserves hyperlink tooltips from real XLSX cells', async (t) => {
+  const directory = await makeTempDir();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = { id: 'before', path: join(directory, 'hyperlink-tooltip.xlsx') };
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('人员');
+  sheet.addRow(['编号', '链接']);
+  sheet.getCell('A2').value = '001';
+  sheet.getCell('B2').value = { text: 'Open', hyperlink: 'https://example.test', tooltip: 'details' };
+  await workbook.xlsx.writeFile(file.path);
+
+  const result = await readFileRows(file, spec());
+
+  assert.deepEqual(result.rows[0].values.链接, ['hyperlink', {
+    text: ['string', 'Open'],
+    target: 'https://example.test',
+    tooltip: 'details'
+  }]);
 });
 
 test('ignores unselected standard columns in explicit comparisons', async (t) => {
