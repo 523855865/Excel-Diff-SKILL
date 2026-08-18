@@ -33,12 +33,14 @@ test('normalizes supported scalar and ExcelJS cell values', () => {
   assert.deepEqual(normalizeValue(true), ['boolean', true]);
   assert.deepEqual(normalizeValue({ error: '#N/A' }), ['error', '#N/A']);
   assert.deepEqual(normalizeValue({ richText: [{ text: 'Hello' }, { text: ' world' }] }), ['string', 'Hello world']);
+  assert.deepEqual(normalizeValue({ foo: 'bar' }), ['string', '[object Object]']);
 });
 
 test('normalizes formulas by all supported formula modes', () => {
   const value = { formula: 'A1+1', result: 2 };
   assert.deepEqual(normalizeValue(value, { formulaMode: 'formula' }), ['formula', 'A1+1']);
   assert.deepEqual(normalizeValue(value, { formulaMode: 'cached-result' }), ['number', 2]);
+  assert.deepEqual(normalizeValue(value, { formulaMode: 'formula-and-cached-result' }), ['formula', ['A1+1', ['number', 2]]]);
   assert.deepEqual(normalizeValue(value), ['formula', ['A1+1', ['number', 2]]]);
 });
 
@@ -56,46 +58,47 @@ test('encodes composite typed keys without delimiter collisions', () => {
 });
 
 test('matches equality, membership, and null filters using typed equality', () => {
-  assert.equal(matchesFilter('001', { operator: 'eq', value: 1 }), false);
-  assert.equal(matchesFilter(1, { operator: 'ne', value: 1 }), false);
-  assert.equal(matchesFilter(1, { operator: 'ne', value: '1' }), true);
-  assert.equal(matchesFilter('active', { operator: 'in', value: ['pending', 'active'] }), true);
-  assert.equal(matchesFilter('active', { operator: 'notIn', values: ['pending', 'closed'] }), true);
-  assert.equal(matchesFilter(null, { operator: 'isNull' }), true);
-  assert.equal(matchesFilter('', { operator: 'isNotNull' }), true);
-  assert.equal(matchesFilter('', { operator: 'isNull' }, { emptyEqualsNull: true }), true);
+  assert.equal(matchesFilter(normalizeValue('001'), { operator: 'eq', value: 1 }), false);
+  assert.equal(matchesFilter(normalizeValue(1), { operator: 'ne', value: 1 }), false);
+  assert.equal(matchesFilter(normalizeValue(1), { operator: 'ne', value: '1' }), true);
+  assert.equal(matchesFilter(normalizeValue('active'), { operator: 'in', value: ['pending', 'active'] }), true);
+  assert.equal(matchesFilter(normalizeValue('active'), { operator: 'notIn', values: ['pending', 'closed'] }), true);
+  assert.equal(matchesFilter(normalizeValue(null), { operator: 'isNull' }), true);
+  assert.equal(matchesFilter(normalizeValue(''), { operator: 'isNotNull' }), true);
+  assert.equal(matchesFilter(normalizeValue('', { emptyEqualsNull: true }), { operator: 'isNull' }, { emptyEqualsNull: true }), true);
 });
 
 test('matches ordered filters only for comparable values of the same type', () => {
-  assert.equal(matchesFilter(2, { operator: 'gt', value: 1 }), true);
-  assert.equal(matchesFilter(2, { operator: 'gte', value: 2 }), true);
-  assert.equal(matchesFilter(2, { operator: 'lt', value: 3 }), true);
-  assert.equal(matchesFilter(2, { operator: 'lte', value: 2 }), true);
-  assert.equal(matchesFilter(2, { operator: 'gt', value: '1' }), false);
-  assert.equal(matchesFilter(true, { operator: 'gt', value: false }), false);
+  assert.equal(matchesFilter(normalizeValue(2), { operator: 'gt', value: 1 }), true);
+  assert.equal(matchesFilter(normalizeValue(2), { operator: 'gte', value: 2 }), true);
+  assert.equal(matchesFilter(normalizeValue(2), { operator: 'lt', value: 3 }), true);
+  assert.equal(matchesFilter(normalizeValue(2), { operator: 'lte', value: 2 }), true);
+  assert.equal(matchesFilter(normalizeValue(2), { operator: 'gt', value: '1' }), false);
+  assert.equal(matchesFilter(normalizeValue(true), { operator: 'gt', value: false }), false);
 });
 
 test('matches closed between ranges only when endpoints have the cell type', () => {
-  assert.equal(matchesFilter(2, { operator: 'between', values: [2, 3] }), true);
-  assert.equal(matchesFilter(3, { operator: 'between', value: [2, 3] }), true);
-  assert.equal(matchesFilter(1, { operator: 'between', values: [2, 3] }), false);
-  assert.equal(matchesFilter(2, { operator: 'between', values: [2, '3'] }), false);
+  assert.equal(matchesFilter(normalizeValue(2), { operator: 'between', values: [2, 3] }), true);
+  assert.equal(matchesFilter(normalizeValue(3), { operator: 'between', value: [2, 3] }), true);
+  assert.equal(matchesFilter(normalizeValue(1), { operator: 'between', values: [2, 3] }), false);
+  assert.equal(matchesFilter(normalizeValue(2), { operator: 'between', values: [2, '3'] }), false);
 });
 
 test('matches string operators only for strings', () => {
-  assert.equal(matchesFilter('spreadsheet', { operator: 'contains', value: 'read' }), true);
-  assert.equal(matchesFilter('spreadsheet', { operator: 'startsWith', value: 'spread' }), true);
-  assert.equal(matchesFilter('spreadsheet', { operator: 'endsWith', value: 'sheet' }), true);
-  assert.equal(matchesFilter(123, { operator: 'contains', value: '2' }), false);
+  assert.equal(matchesFilter(['string', 'Finance'], { operator: 'startsWith', value: 'Fin' }), true);
+  assert.equal(matchesFilter(normalizeValue('spreadsheet'), { operator: 'contains', value: 'read' }), true);
+  assert.equal(matchesFilter(normalizeValue('spreadsheet'), { operator: 'startsWith', value: 'spread' }), true);
+  assert.equal(matchesFilter(normalizeValue('spreadsheet'), { operator: 'endsWith', value: 'sheet' }), true);
+  assert.equal(matchesFilter(normalizeValue(123), { operator: 'contains', value: '2' }), false);
 });
 
 test('matches ISO date literals against date cells', () => {
   assert.equal(
-    matchesFilter(new Date('2026-01-02T00:00:00.000Z'), { operator: 'gte', value: '2026-01-01T00:00:00.000Z' }),
+    matchesFilter(['date', '2026-01-02T00:00:00.000Z'], { operator: 'gte', value: '2026-01-01T00:00:00.000Z' }),
     true
   );
   assert.equal(
-    matchesFilter(new Date('2026-01-02T00:00:00.000Z'), { operator: 'between', values: ['2026-01-02T00:00:00.000Z', '2026-01-03T00:00:00.000Z'] }),
+    matchesFilter(['date', '2026-01-02T00:00:00.000Z'], { operator: 'between', values: ['2026-01-02T00:00:00.000Z', '2026-01-03T00:00:00.000Z'] }),
     true
   );
 });

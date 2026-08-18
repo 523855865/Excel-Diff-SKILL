@@ -47,7 +47,7 @@ function comparable(left, right) {
 }
 
 export function matchesFilter(value, filter, rule = {}) {
-  const cell = normalizeValue(value, rule);
+  const cell = value;
   const literal = (item) => normalizeFilterValue(item, cell[0], rule);
   const values = Object.hasOwn(filter, 'value') ? filter.value : filter.values;
 
