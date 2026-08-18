@@ -1,44 +1,44 @@
-# Excel Diff Phase One Implementation Plan
+# Excel Diff 阶段一实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **供自动化执行代理使用：** 必须使用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans` 子技能，逐项实施本计划。步骤使用复选框（`- [ ]`）跟踪状态。
 
-**Goal:** Build a Node.js CLI that validates a CompareSpec, compares two or more small XLSX files by business key, and writes `summary.json`, `changed.csv`, and `missing.csv`.
+**目标：** 构建一个 Node.js CLI，用于校验 CompareSpec、按业务主键比较两个或更多小型 XLSX 文件，并写出 `summary.json`、`changed.csv` 和 `missing.csv`。
 
-**Architecture:** Keep one deterministic pipeline: validate the spec before I/O, read each selected sheet into typed row records, aggregate by canonical business key, classify keys, then stream the bounded phase-one result arrays to artifact files. Split only at stable responsibilities: spec validation, value semantics, XLSX reading, comparison, reporting, and CLI orchestration.
+**架构：** 保持一条确定性处理链：在 I/O 前校验规则，将每个选定工作表读取为带类型的行记录，按规范业务主键聚合并分类，然后把阶段一的结果数组写入产物文件。只按稳定职责拆分：规则校验、值语义、XLSX 读取、比较、报告和 CLI 编排。
 
-**Tech Stack:** Node.js 24, JavaScript ESM, ExcelJS 4, Ajv 8, `node:test`, Node.js standard library.
+**技术栈：** Node.js 24、JavaScript ESM、ExcelJS 4、Ajv 8、`node:test`、Node.js 标准库。
 
 ---
 
-## File map
+## 文件映射
 
-- `package.json`: ESM package metadata, CLI entry, dependency and test commands.
-- `package-lock.json`: npm-generated dependency lock.
-- `schemas/compare-spec.schema.json`: strict structural CompareSpec contract.
-- `src/spec.js`: schema compilation, semantic validation, and path resolution.
-- `src/normalize.js`: typed canonical values, filters, equality, key encoding, and printable values.
-- `src/read-xlsx.js`: sheet/header validation and row extraction.
-- `src/compare.js`: key aggregation and classification.
-- `src/report.js`: run directory, summary, and CSV artifacts.
-- `src/cli.js`: argument parsing, pipeline orchestration, structured exits.
-- `test/helpers.js`: temporary directory and XLSX fixture helpers.
-- `test/spec.test.js`: structural and semantic spec validation.
-- `test/normalize.test.js`: strict value semantics, filters, and key encoding.
-- `test/read-xlsx.test.js`: workbook and column validation.
-- `test/compare.test.js`: multi-file comparison behavior.
-- `test/report.test.js`: CSV escaping and artifact layout.
-- `test/cli.test.js`: end-to-end CLI and artifact contract.
+- `package.json`：ESM 包元数据、CLI 入口、依赖和测试命令。
+- `package-lock.json`：npm 生成的依赖锁定文件。
+- `schemas/compare-spec.schema.json`：严格的 CompareSpec 结构契约。
+- `src/spec.js`：Schema 编译、语义校验和路径解析。
+- `src/normalize.js`：带类型的规范值、过滤、相等判断、主键编码和可打印值。
+- `src/read-xlsx.js`：工作表及表头校验与行提取。
+- `src/compare.js`：主键聚合与分类。
+- `src/report.js`：运行目录、摘要和 CSV 产物。
+- `src/cli.js`：参数解析、处理链编排和结构化退出。
+- `test/helpers.js`：临时目录和 XLSX 测试数据辅助函数。
+- `test/spec.test.js`：规则结构与语义校验。
+- `test/normalize.test.js`：严格值语义、过滤和主键编码。
+- `test/read-xlsx.test.js`：工作簿和列校验。
+- `test/compare.test.js`：多文件比较行为。
+- `test/report.test.js`：CSV 转义和产物布局。
+- `test/cli.test.js`：CLI 端到端流程和产物契约。
 
-### Task 1: Package and strict CompareSpec validation
+### 任务 1：包配置与严格 CompareSpec 校验
 
-**Files:**
-- Create: `package.json`
-- Create: `package-lock.json`
-- Create: `schemas/compare-spec.schema.json`
-- Create: `src/spec.js`
-- Create: `test/spec.test.js`
+**文件：**
+- 新建：`package.json`
+- 新建：`package-lock.json`
+- 新建：`schemas/compare-spec.schema.json`
+- 新建：`src/spec.js`
+- 新建：`test/spec.test.js`
 
-- [ ] **Step 1: Create the package manifest**
+- [ ] **步骤 1：创建包清单**
 
 ```json
 {
@@ -53,15 +53,15 @@
 }
 ```
 
-- [ ] **Step 2: Install the two runtime dependencies**
+- [ ] **步骤 2：安装两个运行时依赖**
 
-Run: `npm install`
+运行：`npm install`
 
-Expected: `package-lock.json` is generated and npm exits `0`.
+预期：生成 `package-lock.json`，npm 以状态码 `0` 退出。
 
-- [ ] **Step 3: Write the failing spec tests**
+- [ ] **步骤 3：编写预期失败的规则测试**
 
-Create `test/spec.test.js` with tests that call `loadSpec()` using JSON files in a temporary directory:
+创建 `test/spec.test.js`，使用临时目录中的 JSON 文件调用 `loadSpec()`：
 
 ```javascript
 import assert from 'node:assert/strict';
@@ -106,15 +106,15 @@ test('rejects duplicate ids, duplicate paths, and missing baseline', async () =>
 });
 ```
 
-- [ ] **Step 4: Run the test and verify the missing module failure**
+- [ ] **步骤 4：运行测试并确认因模块缺失而失败**
 
-Run: `node --test test/spec.test.js`
+运行：`node --test test/spec.test.js`
 
-Expected: FAIL with `ERR_MODULE_NOT_FOUND` for `src/spec.js`.
+预期：测试失败，并针对 `src/spec.js` 报出 `ERR_MODULE_NOT_FOUND`。
 
-- [ ] **Step 5: Implement the strict schema and semantic validation**
+- [ ] **步骤 5：实现严格 Schema 与语义校验**
 
-Create `schemas/compare-spec.schema.json` with `additionalProperties: false` at every object level. Define these exact fields and enums:
+创建 `schemas/compare-spec.schema.json`，在每层对象上设置 `additionalProperties: false`，并精确定义以下字段和枚举：
 
 ```json
 {
@@ -182,7 +182,7 @@ Create `schemas/compare-spec.schema.json` with `additionalProperties: false` at 
 }
 ```
 
-Create `src/spec.js` with the complete validation flow:
+创建 `src/spec.js`，实现完整校验流程：
 
 ```javascript
 import { readFile } from 'node:fs/promises';
@@ -244,30 +244,30 @@ export async function loadSpec(specPath) {
 }
 ```
 
-This formats schema errors without reading any workbook.
+该流程在不读取任何工作簿的前提下格式化 Schema 错误。
 
-- [ ] **Step 6: Run the focused tests**
+- [ ] **步骤 6：运行聚焦测试**
 
-Run: `node --test test/spec.test.js`
+运行：`node --test test/spec.test.js`
 
-Expected: 3 tests PASS.
+预期：3 个测试通过。
 
-- [ ] **Step 7: Commit the contract**
+- [ ] **步骤 7：提交规则契约**
 
 ```bash
 git add package.json package-lock.json schemas/compare-spec.schema.json src/spec.js test/spec.test.js
 git commit -m "feat: validate compare specs"
 ```
 
-### Task 2: Typed values, filters, and canonical keys
+### 任务 2：带类型的值、过滤与规范主键
 
-**Files:**
-- Create: `src/normalize.js`
-- Create: `test/normalize.test.js`
+**文件：**
+- 新建：`src/normalize.js`
+- 新建：`test/normalize.test.js`
 
-- [ ] **Step 1: Write failing value-semantics tests**
+- [ ] **步骤 1：编写预期失败的值语义测试**
 
-Create `test/normalize.test.js` that imports `normalizeValue`, `equalValues`, `encodeKey`, and `matchesFilter`. Assert:
+创建 `test/normalize.test.js`，导入 `normalizeValue`、`equalValues`、`encodeKey` 和 `matchesFilter`，并断言：
 
 ```javascript
 assert.notDeepEqual(normalizeValue(null, {}), normalizeValue('', {}));
@@ -279,15 +279,15 @@ assert.equal(matchesFilter(['string', 'Finance'], { operator: 'startsWith', valu
 assert.deepEqual(normalizeValue({ formula: 'A1+1', result: 2 }, { formulaMode: 'formula-and-cached-result' }), ['formula', ['A1+1', ['number', 2]]]);
 ```
 
-- [ ] **Step 2: Verify the module is missing**
+- [ ] **步骤 2：确认模块缺失**
 
-Run: `node --test test/normalize.test.js`
+运行：`node --test test/normalize.test.js`
 
-Expected: FAIL with `ERR_MODULE_NOT_FOUND` for `src/normalize.js`.
+预期：测试失败，并针对 `src/normalize.js` 报出 `ERR_MODULE_NOT_FOUND`。
 
-- [ ] **Step 3: Implement the minimum typed-value API**
+- [ ] **步骤 3：实现最小的带类型值 API**
 
-Create `src/normalize.js` with these exports and behavior:
+创建 `src/normalize.js`，提供以下导出和行为：
 
 ```javascript
 export function normalizeValue(value, rule = {}) {
@@ -366,31 +366,31 @@ export function printValue([type, value]) {
 }
 ```
 
-Use `value.richText.map(part => part.text).join('')` for ExcelJS rich text. For formula objects, honor all three formula modes and recursively normalize the cached result. Apply `trim`, then case folding only to strings. When `emptyEqualsNull` is true, normalize the empty string to the same `['blank', null]` representation as a blank cell.
+使用 `value.richText.map(part => part.text).join('')` 处理 ExcelJS 富文本。公式对象需遵守三种公式模式，并递归规范化缓存结果。只对字符串先执行 `trim`，再按规则转换大小写。当 `emptyEqualsNull` 为 `true` 时，将空字符串规范化为与空单元格相同的 `['blank', null]`。
 
-- [ ] **Step 4: Run focused tests**
+- [ ] **步骤 4：运行聚焦测试**
 
-Run: `node --test test/normalize.test.js`
+运行：`node --test test/normalize.test.js`
 
-Expected: all assertions PASS.
+预期：所有断言通过。
 
-- [ ] **Step 5: Commit value semantics**
+- [ ] **步骤 5：提交值语义实现**
 
 ```bash
 git add src/normalize.js test/normalize.test.js
 git commit -m "feat: normalize spreadsheet values"
 ```
 
-### Task 3: XLSX rows and deterministic column mapping
+### 任务 3：XLSX 行读取与确定性列映射
 
-**Files:**
-- Create: `test/helpers.js`
-- Create: `src/read-xlsx.js`
-- Create: `test/read-xlsx.test.js`
+**文件：**
+- 新建：`test/helpers.js`
+- 新建：`src/read-xlsx.js`
+- 新建：`test/read-xlsx.test.js`
 
-- [ ] **Step 1: Add the workbook fixture helper**
+- [ ] **步骤 1：添加工作簿测试数据辅助函数**
 
-Create `test/helpers.js` exporting `makeTempDir()` and `writeWorkbook(file, sheetName, rows)`. Use `new ExcelJS.Workbook()`, `worksheet.addRows(rows)`, and `workbook.xlsx.writeFile(file)`; do not commit binary fixtures.
+创建 `test/helpers.js`，导出 `makeTempDir()` 和 `writeWorkbook(file, sheetName, rows)`。使用 `new ExcelJS.Workbook()`、`worksheet.addRows(rows)` 和 `workbook.xlsx.writeFile(file)`，不提交二进制测试文件。
 
 ```javascript
 import { mkdtemp } from 'node:fs/promises';
@@ -410,38 +410,38 @@ export async function writeWorkbook(file, sheetName, rows) {
 }
 ```
 
-- [ ] **Step 2: Write failing reader tests**
+- [ ] **步骤 2：编写预期失败的读取器测试**
 
-Create `test/read-xlsx.test.js` with generated workbooks that assert:
+创建 `test/read-xlsx.test.js`，用动态生成的工作簿断言：
 
-- `readFileRows()` returns typed values plus `fileId`, `sheetName`, and original `rowNumber`.
-- row order is preserved only as provenance.
-- a missing sheet throws `SHEET_NOT_FOUND` and lists available sheets.
-- duplicate headers throw `HEADER_DUPLICATED` with both positions.
-- missing key, compare, or filter columns throw `COLUMN_MISSING`.
-- NFKC-equivalent headers and explicit `columnAliases` map to the same standard column.
-- two source columns mapping to one standard column throw `COLUMN_MAPPING_AMBIGUOUS`.
+- `readFileRows()` 返回带类型的值以及 `fileId`、`sheetName` 和原始 `rowNumber`。
+- 行顺序只作为溯源信息保留。
+- 缺少工作表时抛出 `SHEET_NOT_FOUND`，并列出可用工作表。
+- 重复表头抛出 `HEADER_DUPLICATED`，并给出两个位置。
+- 缺少主键列、比较列或过滤列时抛出 `COLUMN_MISSING`。
+- NFKC 等价表头和显式 `columnAliases` 均映射到同一标准列。
+- 两个源列映射到同一标准列时抛出 `COLUMN_MAPPING_AMBIGUOUS`。
 
-- [ ] **Step 3: Verify the reader module is missing**
+- [ ] **步骤 3：确认读取器模块缺失**
 
-Run: `node --test test/read-xlsx.test.js`
+运行：`node --test test/read-xlsx.test.js`
 
-Expected: FAIL with `ERR_MODULE_NOT_FOUND` for `src/read-xlsx.js`.
+预期：测试失败，并针对 `src/read-xlsx.js` 报出 `ERR_MODULE_NOT_FOUND`。
 
-- [ ] **Step 4: Implement `readFileRows(file, spec, standardColumns)`**
+- [ ] **步骤 4：实现 `readFileRows(file, spec, standardColumns)`**
 
-Create `src/read-xlsx.js`. Load the workbook with ExcelJS, select `spec.sheet.name`, build a raw header list from `spec.sheet.headerRow`, and map headers by exact text, then NFKC text, then explicit aliases. Reject ambiguity instead of taking the first match.
+创建 `src/read-xlsx.js`。使用 ExcelJS 加载工作簿，选择 `spec.sheet.name`，从 `spec.sheet.headerRow` 构建原始表头列表，并依次按原文、NFKC 文本和显式别名映射表头。遇到歧义时拒绝处理，不能直接选择第一个结果。
 
-For every later row:
+对后续每一行：
 
-1. Build a standard-column object of normalized typed values using global defaults merged with `normalization.columns[column]`.
-2. Apply every filter; skip the row unless all match.
-3. If any key value is blank, increment `invalidRows` and omit the row.
-4. Return `{ fileId, sheetName, rowNumber, values }`.
+1. 合并全局默认规则与 `normalization.columns[column]`，构建标准列到规范化带类型值的对象。
+2. 应用全部过滤条件；只有全部匹配才保留该行。
+3. 任一主键值为空时增加 `invalidRows`，并忽略该行。
+4. 返回 `{ fileId, sheetName, rowNumber, values }`。
 
-Return `{ columns, rows, invalidRows }`. When `compareColumns` is `"*"`, the baseline file establishes `standardColumns`; each later file must resolve every standard column.
+返回 `{ columns, rows, invalidRows }`。当 `compareColumns` 为 `"*"` 时，由基准文件确定 `standardColumns`；后续每个文件都必须解析出所有标准列。
 
-Use this implementation shape, with every helper local to `src/read-xlsx.js`:
+采用以下实现结构，并将全部辅助函数保留在 `src/read-xlsx.js` 内：
 
 ```javascript
 import ExcelJS from 'exceljs';
@@ -526,57 +526,57 @@ export async function readFileRows(file, spec, standardColumns = null) {
 }
 ```
 
-- [ ] **Step 5: Run reader tests**
+- [ ] **步骤 5：运行读取器测试**
 
-Run: `node --test test/read-xlsx.test.js`
+运行：`node --test test/read-xlsx.test.js`
 
-Expected: all reader tests PASS.
+预期：所有读取器测试通过。
 
-- [ ] **Step 6: Commit the reader**
+- [ ] **步骤 6：提交读取器实现**
 
 ```bash
 git add src/read-xlsx.js test/helpers.js test/read-xlsx.test.js
 git commit -m "feat: read keyed xlsx rows"
 ```
 
-### Task 4: Aggregate and classify business keys
+### 任务 4：聚合并分类业务主键
 
-**Files:**
-- Create: `src/compare.js`
-- Create: `test/compare.test.js`
+**文件：**
+- 新建：`src/compare.js`
+- 新建：`test/compare.test.js`
 
-- [ ] **Step 1: Write failing multi-file comparison tests**
+- [ ] **步骤 1：编写预期失败的多文件比较测试**
 
-Create `test/compare.test.js` using generated A/B/C workbooks. Verify this exact scenario:
+创建 `test/compare.test.js`，使用动态生成的 A/B/C 工作簿验证以下精确场景：
 
-- key `1` appears in every file with the same values but different row order: `IDENTICAL`.
-- key `2` appears in every file with one changed department: one changed key and one field detail.
-- key `3` exists only in baseline A: one missing key with `baselineRelation: 'DELETED'`.
-- key `4` exists only in B and C: one missing key with `baselineRelation: 'ADDED'`.
-- key `5` is duplicated in B: one duplicate key; in `report` mode it produces no changed or missing detail.
-- `duplicateKeyPolicy: 'fail'` rejects with `DUPLICATE_KEY`.
+- 主键 `1` 在所有文件中都存在，值相同但行顺序不同：分类为 `IDENTICAL`。
+- 主键 `2` 在所有文件中都存在，但部门字段不同：产生一个变化主键和一条字段明细。
+- 主键 `3` 仅存在于基准文件 A：产生一个缺失主键，且 `baselineRelation: 'DELETED'`。
+- 主键 `4` 仅存在于 B 和 C：产生一个缺失主键，且 `baselineRelation: 'ADDED'`。
+- 主键 `5` 在 B 中重复：产生一个重复主键；在 `report` 模式下不生成变化或缺失明细。
+- `duplicateKeyPolicy: 'fail'` 时以 `DUPLICATE_KEY` 拒绝执行。
 
-- [ ] **Step 2: Verify the comparison module is missing**
+- [ ] **步骤 2：确认比较模块缺失**
 
-Run: `node --test test/compare.test.js`
+运行：`node --test test/compare.test.js`
 
-Expected: FAIL with `ERR_MODULE_NOT_FOUND` for `src/compare.js`.
+预期：测试失败，并针对 `src/compare.js` 报出 `ERR_MODULE_NOT_FOUND`。
 
-- [ ] **Step 3: Implement `compare(spec)`**
+- [ ] **步骤 3：实现 `compare(spec)`**
 
-Create `src/compare.js` that:
+创建 `src/compare.js`，完成以下处理：
 
-1. Reads the baseline first to establish standard columns.
-2. Reads every remaining file against those columns.
-3. Builds `Map<encodeKey(keyValues), Map<fileId, RowRecord[]>>`.
-4. Sorts encoded keys before classification so output is deterministic.
-5. Applies duplicate, missing, identical, and changed classification in that order.
-6. Compares only non-key selected columns with `equalValues()` and their column rule.
-7. Returns `{ summary, changed, missing, duplicates }` without writing files.
+1. 先读取基准文件以确定标准列。
+2. 按这些标准列读取其余每个文件。
+3. 构建 `Map<encodeKey(keyValues), Map<fileId, RowRecord[]>>`。
+4. 分类前对编码后的主键排序，保证输出确定性。
+5. 依次执行重复、缺失、一致和变化分类。
+6. 只使用 `equalValues()` 和对应列规则比较选中的非主键列。
+7. 返回 `{ summary, changed, missing, duplicates }`，不在此处写文件。
 
-The returned summary must contain `files`, `totalRowsScanned`, `matchedRows`, `identicalKeys`, `changedKeys`, `missingKeys`, `duplicateKeys`, and `invalidRows`. A changed entry has `{ key, sheetName, column, files: { [fileId]: { value, rowNumber } } }`. A missing entry has `{ key, sheetName, presentFiles, missingFiles, baselineRelation }`.
+返回的摘要必须包含 `files`、`totalRowsScanned`、`matchedRows`、`identicalKeys`、`changedKeys`、`missingKeys`、`duplicateKeys` 和 `invalidRows`。变化项结构为 `{ key, sheetName, column, files: { [fileId]: { value, rowNumber } } }`；缺失项结构为 `{ key, sheetName, presentFiles, missingFiles, baselineRelation }`。
 
-Implement the classifier directly:
+直接实现分类器：
 
 ```javascript
 import { encodeKey, equalValues } from './normalize.js';
@@ -668,44 +668,44 @@ export async function compare(spec) {
 }
 ```
 
-- [ ] **Step 4: Run comparison tests**
+- [ ] **步骤 4：运行比较测试**
 
-Run: `node --test test/compare.test.js`
+运行：`node --test test/compare.test.js`
 
-Expected: all comparison tests PASS with the documented counts.
+预期：所有比较测试按文档规定的计数通过。
 
-- [ ] **Step 5: Commit the comparison engine**
+- [ ] **步骤 5：提交比较引擎**
 
 ```bash
 git add src/compare.js test/compare.test.js
 git commit -m "feat: compare rows by business key"
 ```
 
-### Task 5: Write run artifacts
+### 任务 5：写出运行产物
 
-**Files:**
-- Create: `src/report.js`
-- Create: `test/report.test.js`
+**文件：**
+- 新建：`src/report.js`
+- 新建：`test/report.test.js`
 
-- [ ] **Step 1: Write failing report tests**
+- [ ] **步骤 1：编写预期失败的报告测试**
 
-Create `test/report.test.js` with an in-memory comparison result containing commas, quotes, and newlines. Assert that `writeReport()`:
+创建 `test/report.test.js`，构造包含逗号、引号和换行符的内存比较结果，并断言 `writeReport()`：
 
-- creates one run-id child directory under the configured output directory;
-- writes valid `summary.json` with `status: 'COMPLETED'` and relative artifact names;
-- writes `changed.csv` and `missing.csv` with UTF-8 text;
-- doubles quotes and quotes fields containing commas, quotes, CR, or LF;
-- emits dynamic `<fileId>.value` and `<fileId>.row` columns in spec file order.
+- 在配置的输出目录下创建一个运行 ID 子目录；
+- 写出有效的 `summary.json`，其中包含 `status: 'COMPLETED'` 和相对产物名；
+- 以 UTF-8 文本写出 `changed.csv` 和 `missing.csv`；
+- 将引号转义为双引号，并为包含逗号、引号、CR 或 LF 的字段加引号；
+- 按规则中的文件顺序生成动态 `<fileId>.value` 和 `<fileId>.row` 列。
 
-- [ ] **Step 2: Verify the report module is missing**
+- [ ] **步骤 2：确认报告模块缺失**
 
-Run: `node --test test/report.test.js`
+运行：`node --test test/report.test.js`
 
-Expected: FAIL with `ERR_MODULE_NOT_FOUND` for `src/report.js`.
+预期：测试失败，并针对 `src/report.js` 报出 `ERR_MODULE_NOT_FOUND`。
 
-- [ ] **Step 3: Implement artifact writing**
+- [ ] **步骤 3：实现产物写出**
 
-Create `src/report.js` with:
+创建 `src/report.js`：
 
 ```javascript
 import { randomUUID } from 'node:crypto';
@@ -745,53 +745,53 @@ export async function writeReport(spec, result) {
 }
 ```
 
-Use a run ID built from an ISO UTC timestamp without punctuation plus the first eight characters of `randomUUID()`. Write CSV headers even when there are no details. Sort details by encoded key and then column. Write `summary.json` last, adding `status`, `runId`, and `artifacts` to the engine summary.
+运行 ID 由去除标点的 ISO UTC 时间戳和 `randomUUID()` 前八个字符组成。即使没有明细，也要写出 CSV 表头。先按编码主键、再按列名排序明细。最后写 `summary.json`，并在引擎摘要上增加 `status`、`runId` 和 `artifacts`。
 
-- [ ] **Step 4: Run report tests**
+- [ ] **步骤 4：运行报告测试**
 
-Run: `node --test test/report.test.js`
+运行：`node --test test/report.test.js`
 
-Expected: all report tests PASS.
+预期：所有报告测试通过。
 
-- [ ] **Step 5: Commit reporting**
+- [ ] **步骤 5：提交报告实现**
 
 ```bash
 git add src/report.js test/report.test.js
 git commit -m "feat: write comparison artifacts"
 ```
 
-### Task 6: CLI end-to-end closure
+### 任务 6：完成 CLI 端到端闭环
 
-**Files:**
-- Create: `src/cli.js`
-- Create: `test/cli.test.js`
-- Modify: `README.md`
+**文件：**
+- 新建：`src/cli.js`
+- 新建：`test/cli.test.js`
+- 修改：`README.md`
 
-- [ ] **Step 1: Write the failing CLI test**
+- [ ] **步骤 1：编写预期失败的 CLI 测试**
 
-Create `test/cli.test.js`. Generate two workbooks and one spec, invoke `process.execPath` with `src/cli.js compare --spec <path>` through `spawnSync`, and assert:
+创建 `test/cli.test.js`。生成两个工作簿和一份规则，通过 `spawnSync` 使用 `process.execPath` 调用 `src/cli.js compare --spec <path>`，并断言：
 
-- exit status `0`;
-- stdout parses as one JSON object with `status: 'COMPLETED'`;
-- stderr is empty;
-- the returned run directory contains all three artifacts;
-- an invalid spec exits `2` and stderr contains a JSON error with `code: 'SPEC_INVALID'`;
-- a missing input file exits `4` with `code: 'INPUT_ERROR'`;
-- an unknown command or missing `--spec` exits `2`.
+- 退出状态为 `0`；
+- 标准输出可解析为一个包含 `status: 'COMPLETED'` 的 JSON 对象；
+- 标准错误为空；
+- 返回的运行目录包含三种产物；
+- 非法规则以状态码 `2` 退出，标准错误包含 `code: 'SPEC_INVALID'` 的 JSON 错误；
+- 输入文件缺失时以状态码 `4` 退出，并包含 `code: 'INPUT_ERROR'`；
+- 未知命令或缺少 `--spec` 时以状态码 `2` 退出。
 
-- [ ] **Step 2: Verify the CLI is missing**
+- [ ] **步骤 2：确认 CLI 缺失**
 
-Run: `node --test test/cli.test.js`
+运行：`node --test test/cli.test.js`
 
-Expected: FAIL because `src/cli.js` does not exist.
+预期：由于 `src/cli.js` 不存在而测试失败。
 
-- [ ] **Step 3: Implement the CLI**
+- [ ] **步骤 3：实现 CLI**
 
-Create executable `src/cli.js` with a small manual parser accepting only `compare --spec <path>`. Call `loadSpec()`, `compare()`, and `writeReport()` in order. Print only `JSON.stringify(summary)` to stdout. Print `{ status: 'FAILED', code, message }` JSON to stderr.
+创建可执行的 `src/cli.js`，使用小型手写解析器且只接受 `compare --spec <path>`。依次调用 `loadSpec()`、`compare()` 和 `writeReport()`。标准输出只打印 `JSON.stringify(summary)`，标准错误打印 `{ status: 'FAILED', code, message }` JSON。
 
-Map `SpecError` and usage errors to exit `2`, missing/unreadable/XLSX input errors to `4`, and unexpected errors to `6`. Do not print stack traces unless `EXCEL_DIFF_DEBUG=1`.
+将 `SpecError` 和用法错误映射到退出码 `2`，文件缺失、不可读或 XLSX 输入错误映射到 `4`，意外错误映射到 `6`。只有 `EXCEL_DIFF_DEBUG=1` 时才打印堆栈。
 
-Use this complete orchestration:
+使用以下完整编排代码：
 
 ```javascript
 #!/usr/bin/env node
@@ -827,14 +827,14 @@ main(process.argv.slice(2)).catch(error => {
 });
 ```
 
-- [ ] **Step 4: Document the runnable phase-one flow**
+- [ ] **步骤 4：记录阶段一可运行流程**
 
-Replace the one-line README with installation, the exact CLI command, a complete two-file key-mode CompareSpec example, output paths, strict-default warnings, phase-one limits, and `npm test`.
+将单行 README 替换为安装方法、准确的 CLI 命令、完整的两文件主键模式 CompareSpec 示例、输出路径、严格默认值提示、阶段一限制和 `npm test`。
 
 ````markdown
 # Excel Diff
 
-Deterministic small-file XLSX comparison by business key.
+按业务主键确定性比较小型 XLSX 文件。
 
 ```bash
 npm install
@@ -861,67 +861,67 @@ node src/cli.js compare --spec compare-spec.json
 }
 ```
 
-Each run writes `summary.json`, `changed.csv`, and `missing.csv` under `output/<run-id>/`.
+每次运行都会在 `output/<run-id>/` 下写出 `summary.json`、`changed.csv` 和 `missing.csv`。
 
-Defaults are strict: whitespace, case, blank cells, empty strings, numbers, and numeric strings remain distinct. Formula results are read from the workbook cache and are not recalculated.
+默认规则严格：空格、大小写、空单元格、空字符串、数字和数字字符串均保持区别。公式结果读取工作簿中的缓存值，不重新计算。
 
-Phase one loads selected worksheets into memory and supports only `key` mode. Streaming partitions, `row`, `multiset`, and Agent wrappers follow in later phases.
+阶段一将选定工作表加载到内存，且只支持 `key` 模式。流式分区、`row`、`multiset` 和 Agent 包装将在后续阶段实现。
 
 ```bash
 npm test
 ```
 ````
 
-- [ ] **Step 5: Run the end-to-end test**
+- [ ] **步骤 5：运行端到端测试**
 
-Run: `node --test test/cli.test.js`
+运行：`node --test test/cli.test.js`
 
-Expected: all CLI tests PASS.
+预期：所有 CLI 测试通过。
 
-- [ ] **Step 6: Run the complete verification suite**
+- [ ] **步骤 6：运行完整验证套件**
 
-Run: `npm test`
+运行：`npm test`
 
-Expected: every test file PASS and process exits `0`.
+预期：所有测试文件通过，进程以状态码 `0` 退出。
 
-Run: `npm pack --dry-run`
+运行：`npm pack --dry-run`
 
-Expected: package contents include `src/`, `schemas/`, and `README.md`; no test output or temporary XLSX files are included.
+预期：包内容包含 `src/`、`schemas/` 和 `README.md`，不包含测试输出或临时 XLSX 文件。
 
-- [ ] **Step 7: Commit the runnable phase**
+- [ ] **步骤 7：提交可运行的阶段一实现**
 
 ```bash
 git add src/cli.js test/cli.test.js README.md
 git commit -m "feat: add excel diff cli"
 ```
 
-### Task 7: Final contract and hygiene verification
+### 任务 7：最终契约与仓库卫生验证
 
-**Files:**
-- Modify only if a verification failure proves a defect in a phase-one file.
+**文件：**
+- 只有验证失败证明阶段一文件存在缺陷时才修改。
 
-- [ ] **Step 1: Check the working tree without touching unrelated files**
+- [ ] **步骤 1：检查工作区且不触碰无关文件**
 
-Run: `git status --short`
+运行：`git status --short`
 
-Expected: pre-existing `.DS_Store` and `graphify-out/` may remain untracked; no generated XLSX, output directory, or npm debug log appears.
+预期：已有的 `.DS_Store` 和 `graphify-out/` 可以继续保持未跟踪；不得出现生成的 XLSX、输出目录或 npm 调试日志。
 
-- [ ] **Step 2: Re-run all tests from a clean dependency install**
+- [ ] **步骤 2：基于全新依赖安装重新运行全部测试**
 
-Run: `npm ci`
+运行：`npm ci`
 
-Expected: dependency install exits `0` using `package-lock.json`.
+预期：使用 `package-lock.json` 安装依赖，并以状态码 `0` 退出。
 
-Run: `npm test`
+运行：`npm test`
 
-Expected: all tests PASS.
+预期：所有测试通过。
 
-- [ ] **Step 3: Exercise a real generated comparison**
+- [ ] **步骤 3：执行一次真实的动态生成数据比较**
 
-Run the CLI against the fixtures created by `test/cli.test.js` through the test itself, then read its summary and both CSV artifacts. Confirm counts match the test scenario and every changed row includes sheet, key, column, values, and original row numbers.
+通过测试本身，使用 CLI 比较 `test/cli.test.js` 创建的测试数据，然后读取摘要和两个 CSV 产物。确认计数与测试场景一致，并且每条变化记录都包含工作表、主键、列、值和原始行号。
 
-- [ ] **Step 4: Verify no accidental scope expansion**
+- [ ] **步骤 4：确认没有意外扩大范围**
 
-Run: `git diff --stat 939e55f..HEAD`
+运行：`git diff --stat 939e55f..HEAD`
 
-Expected: only the phase-one package, schema, source, tests, README, and implementation plan changed. No streaming partitions, `row`/`multiset`, Skill wrapper, plugin, UI, or database code exists.
+预期：只有阶段一的包配置、Schema、源码、测试、README 和实施计划发生变化；不存在流式分区、`row`/`multiset`、Skill 包装、插件、UI 或数据库代码。
