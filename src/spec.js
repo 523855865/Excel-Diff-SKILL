@@ -58,6 +58,7 @@ export async function loadSpec(specPath) {
   if (!validate(spec)) {
     throw invalid(validate.errors.map(({ instancePath, message }) => `${instancePath || '/'} ${message}`).join('; '));
   }
+  if (spec.files.length > spec.resources.maxFiles) throw invalid('file count exceeds resources.maxFiles');
 
   const specDirectory = dirname(absoluteSpecPath);
   const ids = new Set();

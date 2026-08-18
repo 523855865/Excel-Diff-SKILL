@@ -148,6 +148,49 @@ test('rejects unknown properties in nested rule objects', async (t) => {
   }
 });
 
+test('accepts exact key, row, and multiset mode shapes', async (t) => {
+  const key = await loadSpec(await writeSpec(t, validSpec()));
+  const row = await loadSpec(await writeSpec(t, validSpec({ mode: { type: 'row' } })));
+  const multiset = await loadSpec(await writeSpec(t, validSpec({ mode: { type: 'multiset' } })));
+
+  assert.deepEqual(key.mode, { type: 'key', keyColumns: ['员工编号'] });
+  assert.deepEqual(row.mode, { type: 'row' });
+  assert.deepEqual(multiset.mode, { type: 'multiset' });
+});
+
+test('rejects keyColumns outside key mode and missing key columns in key mode', async (t) => {
+  await rejectsSpec(t, validSpec({ mode: { type: 'row', keyColumns: ['员工编号'] } }), /must NOT have additional properties/);
+  await rejectsSpec(t, validSpec({ mode: { type: 'multiset', keyColumns: ['员工编号'] } }), /must NOT have additional properties/);
+  await rejectsSpec(t, validSpec({ mode: { type: 'key' } }), /keyColumns/);
+});
+
+test('defaults positive resource limits and rejects invalid limits', async (t) => {
+  const spec = await loadSpec(await writeSpec(t, validSpec()));
+
+  assert.deepEqual(spec.resources, {
+    maxFiles: 16,
+    maxInputBytes: 10 * 1024 ** 3,
+    maxRows: 10_000_000,
+    maxCells: 500_000_000,
+    maxTempBytes: 50 * 1024 ** 3,
+    maxPartitionBytes: 64 * 1024 ** 2,
+    maxRuntimeMs: 24 * 60 * 60 * 1000
+  });
+  for (const field of Object.keys(spec.resources)) {
+    await rejectsSpec(t, validSpec({ resources: { [field]: 0 } }), /must be >= 1/);
+    await rejectsSpec(t, validSpec({ resources: { [field]: 1.5 } }), /must be integer/);
+  }
+  await rejectsSpec(t, validSpec({ resources: { unexpected: 1 } }), /must NOT have additional properties/);
+});
+
+test('rejects file counts above the configured resource limit', async (t) => {
+  await rejectsSpec(t, validSpec({
+    files: Array.from({ length: 3 }, (_, index) => ({ id: `file-${index}`, path: `file-${index}.xlsx` })),
+    baseline: 'file-0',
+    resources: { maxFiles: 2 }
+  }), /maxFiles/);
+});
+
 test('defaults sampleSize and optional collections', async (t) => {
   const spec = await loadSpec(await writeSpec(t, validSpec()));
 

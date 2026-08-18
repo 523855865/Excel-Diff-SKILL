@@ -5,12 +5,12 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { makeTempDir, writeWorkbook } from './helpers.js';
-import { InputError, readFileRows } from '../src/read-xlsx.js';
+import { InputError, readFileRows, scanFileRows } from '../src/read-xlsx.js';
 
 function spec(overrides = {}) {
   return {
     sheet: { name: '人员', headerRow: 1 },
-    mode: { keyColumns: ['编号'] },
+    mode: { type: 'key', keyColumns: ['编号'] },
     compareColumns: '*',
     columnAliases: {},
     filters: [],
@@ -129,6 +129,52 @@ test('filters rows before counting blank keys as invalid', async (t) => {
   assert.deepEqual(result.rows.map((row) => row.values.编号), [['string', '001']]);
 });
 
+test('accepts blank values in row and multiset modes', async (t) => {
+  const file = await fixture(t, [['编号'], [null]]);
+
+  for (const type of ['row', 'multiset']) {
+    const result = await readFileRows(file, spec({ mode: { type } }));
+    assert.equal(result.invalidRows, 0);
+    assert.equal(result.rows.length, 1);
+    assert.deepEqual(result.rows[0].values.编号, ['blank', null]);
+  }
+});
+
+test('streams 2,000 real XLSX rows through awaited callbacks without returning rows', async (t) => {
+  const file = await fixture(t, [
+    ['编号', '姓名'],
+    ...Array.from({ length: 2_000 }, (_, index) => [`${index + 1}`.padStart(4, '0'), `员工${index + 1}`])
+  ]);
+  const records = [];
+
+  const result = await scanFileRows(file, spec(), null, async (record) => {
+    await Promise.resolve();
+    if (record.rowNumber === 2 || record.rowNumber === 2_001) records.push(record);
+  });
+
+  assert.deepEqual(result, {
+    columns: ['编号', '姓名'],
+    invalidRows: 0,
+    totalRowsScanned: 2_000,
+    matchedRows: 2_000
+  });
+  assert.equal(Object.hasOwn(result, 'rows'), false);
+  assert.deepEqual(records.map(({ rowNumber }) => rowNumber), [2, 2_001]);
+  assert.deepEqual(records[0].values.编号, ['string', '0001']);
+  assert.deepEqual(records[1].values.姓名, ['string', '员工2000']);
+});
+
+test('streams ExcelJS workbooks whose worksheet entry precedes workbook metadata', async (t) => {
+  const file = await fixture(t, [
+    ['编号', '日期'],
+    ['001', new Date('2026-01-02T00:00:00.000Z')]
+  ]);
+
+  const result = await readFileRows(file, spec());
+
+  assert.deepEqual(result.rows[0].values.日期, ['date', '2026-01-02T00:00:00.000Z']);
+});
+
 test('reports absent sheets with available sheet names', async (t) => {
   const file = await fixture(t, [['编号'], ['001']], '实际表');
 
@@ -243,6 +289,48 @@ test('reads formula cache values, shared formulas, and rich text from XLSX cells
   });
 });
 
+test('expands interleaved shared formula groups by their shared IDs', async (t) => {
+  const directory = await makeTempDir();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = { id: 'before', path: join(directory, 'interleaved-formulas.xlsx') };
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('人员');
+  sheet.addRow(['编号', '加一', '乘十']);
+  sheet.addRow(['001']);
+  sheet.addRow(['002']);
+  sheet.fillFormula('B2:B3', 'A2+1', [2, 3]);
+  sheet.fillFormula('C2:C3', 'B2*10', [20, 30]);
+  await workbook.xlsx.writeFile(file.path);
+
+  const result = await readFileRows(file, spec());
+
+  assert.deepEqual(result.rows[1].values.加一, ['formula', ['A3+1', ['number', 3]]]);
+  assert.deepEqual(result.rows[1].values.乘十, ['formula', ['B3*10', ['number', 30]]]);
+});
+
+test('normalizes cached formula dates in every formula mode', async (t) => {
+  const directory = await makeTempDir();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = { id: 'before', path: join(directory, 'formula-date.xlsx') };
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('人员');
+  sheet.addRow(['编号', '日期公式']);
+  sheet.getCell('A2').value = '001';
+  sheet.getCell('B2').value = { formula: 'DATE(2026,1,2)', result: new Date('2026-01-02T00:00:00.000Z') };
+  sheet.getCell('B2').numFmt = 'yyyy-mm-dd';
+  await workbook.xlsx.writeFile(file.path);
+
+  for (const [formulaMode, expected] of [
+    ['formula', ['formula', 'DATE(2026,1,2)']],
+    ['cached-result', ['date', '2026-01-02T00:00:00.000Z']],
+    ['formula-and-cached-result', ['formula', ['DATE(2026,1,2)', ['date', '2026-01-02T00:00:00.000Z']]]]
+  ]) {
+    const rules = spec({ normalization: { columns: {}, formulaMode } });
+    const result = await readFileRows(file, rules);
+    assert.deepEqual(result.rows[0].values.日期公式, expected);
+  }
+});
+
 test('ignores unselected standard columns in explicit comparisons', async (t) => {
   const file = await fixture(t, [['编号', '姓名'], ['001', 'Alice']]);
 
@@ -303,13 +391,21 @@ test('wraps unreadable workbooks as INPUT_ERROR', async (t) => {
 
 test('wraps unsupported cell values without leaking their contents', async (t) => {
   const file = await fixture(t, [['编号', '姓名'], ['001', 'Alice']]);
-  const Xlsx = new ExcelJS.Workbook().xlsx.constructor;
-  const originalReadFile = Xlsx.prototype.readFile;
-  Xlsx.prototype.readFile = async function patchedReadFile(path) {
-    await originalReadFile.call(this, path);
-    this.workbook.getWorksheet('人员').getCell('B2').value = { secret: 'do-not-leak' };
+  const Reader = ExcelJS.stream.xlsx.WorkbookReader;
+  const originalIterator = Reader.prototype[Symbol.asyncIterator];
+  Reader.prototype[Symbol.asyncIterator] = async function* patchedIterator() {
+    for await (const sheet of originalIterator.call(this)) {
+      const iterateRows = sheet[Symbol.asyncIterator].bind(sheet);
+      sheet[Symbol.asyncIterator] = async function* patchedRows() {
+        for await (const row of iterateRows()) {
+          if (row.number === 2) row.getCell(2).value = { secret: 'do-not-leak' };
+          yield row;
+        }
+      };
+      yield sheet;
+    }
   };
-  t.after(() => { Xlsx.prototype.readFile = originalReadFile; });
+  t.after(() => { Reader.prototype[Symbol.asyncIterator] = originalIterator; });
 
   await assert.rejects(
     () => readFileRows(file, spec()),

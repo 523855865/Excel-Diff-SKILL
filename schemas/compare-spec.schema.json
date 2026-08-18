@@ -48,18 +48,34 @@
       }
     },
     "mode": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["type", "keyColumns"],
-      "properties": {
-        "type": { "const": "key" },
-        "keyColumns": {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": { "type": "string", "minLength": 1 }
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "keyColumns"],
+          "properties": {
+            "type": { "const": "key" },
+            "keyColumns": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": { "type": { "const": "row" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": { "type": { "const": "multiset" } }
         }
-      }
+      ]
     },
     "compareColumns": {
       "oneOf": [
@@ -155,6 +171,29 @@
       }
     },
     "duplicateKeyPolicy": { "enum": ["report", "fail"] },
+    "resources": {
+      "type": "object",
+      "default": {},
+      "additionalProperties": false,
+      "required": [
+        "maxFiles",
+        "maxInputBytes",
+        "maxRows",
+        "maxCells",
+        "maxTempBytes",
+        "maxPartitionBytes",
+        "maxRuntimeMs"
+      ],
+      "properties": {
+        "maxFiles": { "type": "integer", "minimum": 1, "default": 16 },
+        "maxInputBytes": { "type": "integer", "minimum": 1, "default": 10737418240 },
+        "maxRows": { "type": "integer", "minimum": 1, "default": 10000000 },
+        "maxCells": { "type": "integer", "minimum": 1, "default": 500000000 },
+        "maxTempBytes": { "type": "integer", "minimum": 1, "default": 53687091200 },
+        "maxPartitionBytes": { "type": "integer", "minimum": 1, "default": 67108864 },
+        "maxRuntimeMs": { "type": "integer", "minimum": 1, "default": 86400000 }
+      }
+    },
     "output": {
       "type": "object",
       "additionalProperties": false,
