@@ -1,17 +1,17 @@
-# Excel Diff（第一阶段）
+# Excel Diff
 
-使用 Node.js 24 比较两份或多份 Excel `.xlsx` 文件。先安装依赖：
+使用 Node.js 24 流式比较两份或多份 Excel `.xlsx` 文件。先安装依赖：
 
 ```sh
 npm ci
-node src/cli.js compare --spec /absolute/path/to/compare.json
+node src/cli.js compare --spec /absolute/path/to/compare.json [--progress] [--keep-temp]
 ```
 
-也可通过安装后的命令运行：`excel-diff compare --spec /absolute/path/to/compare.json`。
+也可通过安装后的命令运行：`excel-diff compare --spec /absolute/path/to/compare.json`。`compare` 之后的 `--spec`、`--progress` 和 `--keep-temp` 可以任意顺序出现。
 
 ## CompareSpec
 
-路径相对于 JSON 文件所在目录解析。第一阶段只支持业务键（`key`）模式，完整的两文件示例如下：
+路径相对于 JSON 文件所在目录解析。完整的两文件 `key` 模式示例如下：
 
 ```json
 {
@@ -29,19 +29,39 @@ node src/cli.js compare --spec /absolute/path/to/compare.json
 }
 ```
 
-严格默认值为：`output.sampleSize` 为 `20`；`filters` 与 `columnAliases` 为空；标准化为 `emptyEqualsNull: false`、`caseSensitive: true`、`formulaMode: "formula-and-cached-result"`。公式只读取工作簿中已有的公式和缓存值，**不会重算公式**；超长数字应以文本单元格保存，以免 Excel 的数值精度限制改变业务键或比较值。
+支持三种模式：
 
-成功时标准输出仅有一行 JSON，包含汇总字段和本次绝对输出目录 `directory`。该目录包含：
+- `{"type":"key","keyColumns":["员工编号"]}`：按有类型的业务键比较，键列不再作为值列比较；
+- `{"type":"row"}`：按物理行号比较所有选中列；
+- `{"type":"multiset"}`：忽略行顺序，按所有选中列的有类型值组合统计每个文件的出现次数。
+
+严格默认值为：`output.sampleSize` 为 `20`；`filters` 与 `columnAliases` 为空；标准化为 `emptyEqualsNull: false`、`caseSensitive: true`、`formulaMode: "formula-and-cached-result"`。资源限制默认值为：
+
+| 字段 | 默认值 |
+| --- | ---: |
+| `maxFiles` | 16 |
+| `maxInputBytes` | 10,737,418,240 |
+| `maxRows` | 10,000,000 |
+| `maxCells` | 500,000,000 |
+| `maxTempBytes` | 53,687,091,200 |
+| `maxPartitionBytes` | 67,108,864 |
+| `maxRuntimeMs` | 86,400,000 |
+
+公式只读取工作簿中已有的公式和缓存值，**不会重算公式**；若缓存值过期，比较结果也会反映该过期值。超长数字应以文本单元格保存，以免 Excel 的数值精度限制改变业务键或比较值。
+
+## 输出与进度
+
+成功时标准输出仅有一行 JSON，包含汇总字段和本次绝对输出目录 `directory`。比较过程逐行读取 XLSX，将紧凑记录写入临时磁盘分区，内存中只加载当前有界分区。报告先写入输出目录下的隐藏 `.tmp` staging 目录，完成后才原子重命名为最终目录。`output.directory` 必须是单写者目录；Node.js 标准库不提供 POSIX 目录 `rename-noreplace`，因此外部进程若在最终冲突检查与 `rename` 之间抢占同一个随机 run ID，不在保证范围内。最终目录包含：
 
 - `summary.json`：本次汇总；
-- `changed.csv`：字段差异；每个文件按 `<fileId>.value`、`<fileId>.type`、`<fileId>.row` 分列，值列不包含类型包装；
-- `missing.csv`：新增、删除的业务键；单字段 key 直接显示值，复合 key 显示不含类型包装的 JSON 数组。
+- `key`/`row` 模式的 `changed.csv` 和 `missing.csv`：字段差异以及新增、删除记录；
+- `multiset` 模式的 `multiset.csv`：值组合、sheet、按 CompareSpec 文件顺序排列的 `<fileId>.count` 和 `baselineRelation`。
 
 为防止 CSV 公式注入，危险的标签、key 和值会编码为 `json:<JSON string>`。
 
-## 范围与验证
+`--progress` 在标准错误输出 NDJSON 进度，最多每 1,000 个扫描行一次并包含最终进度；事件只有 `bytesWritten`、`currentFile`、`rowsScanned`、`type` 四个非敏感字段。`--keep-temp` 在成功 stdout JSON 中增加绝对 `tempDirectory` 并保留临时分区；使用者负责清理。
 
-第一阶段会将工作表载入内存，不提供 streaming、按行模式、multiset 比较或 Agent 包装。
+## 验证与错误
 
 ```sh
 npm test
@@ -54,4 +74,4 @@ npm test
 | 4 | 输入文件或比较错误 |
 | 6 | 未预期内部错误 |
 
-失败时标准错误仅有一行 JSON：`{"status":"FAILED","code":"...","message":"..."}`。默认不输出堆栈；设置 `EXCEL_DIFF_DEBUG=1` 时会在该 JSON 中附加 `stack`。
+只要输出文件系统仍可写，失败时未发布的 CSV staging 会被删除，并原子发布一个仅含脱敏 `summary.json` 的失败目录。若输出目录一开始就无法创建，物理上无法写入失败报告；若文件系统在清理或发布中变为不可写，程序会尽力清除明细，可能只留下空 staging 目录，并以脱敏 `INTERNAL_ERROR` 报告。未启用 progress 时，标准错误仅有一行 JSON：`{"status":"FAILED","code":"...","message":"..."}`。默认不输出堆栈；设置 `EXCEL_DIFF_DEBUG=1` 时会在该 stderr JSON 中附加 `stack`。

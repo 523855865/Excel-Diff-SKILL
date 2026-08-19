@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
-import { readFile, rm, stat } from 'node:fs/promises';
+import { chmodSync, mkdirSync } from 'node:fs';
+import { chmod, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { Writable } from 'node:stream';
 import test from 'node:test';
 
 import { makeTempDir } from './helpers.js';
-import { csvCell, writeReport } from '../src/report.js';
+import { createReportWriter, csvCell, writeReport } from '../src/report.js';
 
 const typed = (type, value) => [type, value];
 
@@ -57,6 +59,210 @@ test('csvCell escapes only CSV-special values', () => {
   assert.equal(csvCell('a\rb'), '"a\rb"');
   assert.equal(csvCell('a\nb'), '"a\nb"');
   assert.equal(csvCell('a,"b\r\nc'), '"a,""b\r\nc"');
+});
+
+test('createReportWriter atomically publishes streamed key details', async (t) => {
+  const directory = await makeTempDir();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const writer = await createReportWriter(reportSpec(directory, ['A', 'B']));
+
+  const staged = await readdir(directory);
+  assert.equal(staged.length, 1);
+  assert.match(staged[0], /^\..+\.tmp$/);
+  await writer.onChanged({
+    key: [typed('string', '1')], sheetName: '人员', column: '姓名',
+    files: {
+      A: { value: typed('string', 'before'), rowNumber: 2 },
+      B: { value: typed('string', 'after'), rowNumber: 2 }
+    }
+  });
+  await writer.onMissing({
+    key: [typed('string', '2')], sheetName: '人员',
+    presentFiles: ['A'], missingFiles: ['B'], baselineRelation: 'DELETED'
+  });
+
+  const completed = await writer.complete({ files: 2, changedKeys: 1, missingKeys: 1 });
+  assert.equal(completed.summary.status, 'COMPLETED');
+  assert.equal((await stat(completed.directory)).isDirectory(), true);
+  assert.equal((await readdir(directory)).some((name) => name.endsWith('.tmp')), false);
+  assert.deepEqual((await readdir(completed.directory)).sort(), ['changed.csv', 'missing.csv', 'summary.json']);
+  assert.equal(parseCsv(await readFile(join(completed.directory, 'changed.csv'), 'utf8')).length, 2);
+  assert.equal(parseCsv(await readFile(join(completed.directory, 'missing.csv'), 'utf8')).length, 2);
+});
+
+test('createReportWriter preserves empty and non-empty final path collisions', async (t) => {
+  const root = await makeTempDir();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const kind of ['empty', 'non-empty']) {
+    const directory = join(root, kind);
+    await mkdir(directory);
+    const writer = await createReportWriter(reportSpec(directory, ['A', 'B']));
+    const [stagingName] = (await readdir(directory)).filter((name) => name.endsWith('.tmp'));
+    const initialRunId = stagingName.slice(1, -4);
+    const collision = join(directory, initialRunId);
+    await mkdir(collision);
+    if (kind === 'non-empty') await writeFile(join(collision, 'sentinel.txt'), 'preserve me', 'utf8');
+
+    const completed = await writer.complete({ files: 2 });
+
+    assert.notEqual(completed.summary.runId, initialRunId);
+    assert.equal(completed.directory, join(directory, completed.summary.runId));
+    assert.equal((await readdir(directory)).some((name) => name.endsWith('.tmp')), false);
+    assert.equal((await stat(collision)).isDirectory(), true);
+    if (kind === 'non-empty') assert.equal(await readFile(join(collision, 'sentinel.txt'), 'utf8'), 'preserve me');
+  }
+});
+
+test('createReportWriter rechecks its final path after writing a large summary', { timeout: 10_000 }, async (t) => {
+  const directory = await makeTempDir();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const writer = await createReportWriter(reportSpec(directory, ['A', 'B']));
+  const [stagingName] = (await readdir(directory)).filter((name) => name.endsWith('.tmp'));
+  const initialRunId = stagingName.slice(1, -4);
+  const staging = join(directory, stagingName);
+  const collision = join(directory, initialRunId);
+  const createCollision = async () => {
+    while (true) {
+      try {
+        await stat(join(staging, 'summary.json'));
+        mkdirSync(collision);
+        return;
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    }
+  };
+
+  const [completed] = await Promise.all([
+    writer.complete({ files: 2, padding: 'x'.repeat(20 * 1024 * 1024) }),
+    createCollision()
+  ]);
+
+  assert.notEqual(completed.summary.runId, initialRunId);
+  assert.deepEqual(await readdir(collision), []);
+  assert.equal(completed.directory, join(directory, completed.summary.runId));
+  assert.equal((await readdir(directory)).some((name) => name.endsWith('.tmp')), false);
+});
+
+test('abort reselects a run ID when its initial failure path is occupied', async (t) => {
+  const directory = await makeTempDir();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const writer = await createReportWriter(reportSpec(directory, ['A', 'B']));
+  const [stagingName] = (await readdir(directory)).filter((name) => name.endsWith('.tmp'));
+  const initialRunId = stagingName.slice(1, -4);
+  const collision = join(directory, initialRunId);
+  await mkdir(collision);
+  await writeFile(join(collision, 'sentinel.txt'), 'preserve me', 'utf8');
+
+  const aborted = await writer.abort(Object.assign(new Error('failed'), { code: 'INPUT_ERROR' }));
+
+  assert.notEqual(aborted.summary.runId, initialRunId);
+  assert.equal(aborted.directory, join(directory, aborted.summary.runId));
+  assert.deepEqual(await readdir(aborted.directory), ['summary.json']);
+  assert.equal(await readFile(join(collision, 'sentinel.txt'), 'utf8'), 'preserve me');
+  assert.equal((await readdir(directory)).some((name) => name.endsWith('.tmp')), false);
+});
+
+test('header initialization failures remain abortable and publish only FAILED summaries', async (t) => {
+  const root = await makeTempDir();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const kind of ['sync', 'async']) {
+    const directory = join(root, kind);
+    const headerError = Object.assign(new Error(`SECRET-${kind}-HEADER`), { code: kind === 'sync' ? 'STREAM_INIT' : 'EIO' });
+    const writer = await createReportWriter(reportSpec(directory, ['A', 'B']), {
+      createStream: kind === 'sync'
+        ? () => { throw headerError; }
+        : () => new Writable({ write(_chunk, _encoding, callback) { setImmediate(callback, headerError); } })
+    });
+
+    await assert.rejects(() => writer.complete({ files: 2 }), (error) => error === headerError);
+    const aborted = await writer.abort(headerError);
+    const summaryText = await readFile(join(aborted.directory, 'summary.json'), 'utf8');
+    assert.deepEqual(await readdir(aborted.directory), ['summary.json']);
+    assert.equal(aborted.summary.code, headerError.code);
+    assert.doesNotMatch(summaryText, /SECRET-/);
+    assert.equal((await readdir(directory)).some((name) => name.endsWith('.tmp')), false);
+  }
+});
+
+test('createReportWriter aborts failed writes into a redacted summary-only report', async (t) => {
+  const directory = await makeTempDir();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const writeError = Object.assign(new Error('SECRET-WRITE-VALUE'), { code: 'WRITE_FAILED' });
+  let writes = 0;
+  const writer = await createReportWriter(reportSpec(directory, ['A', 'B']), {
+    createStream: () => new Writable({
+      write(_chunk, _encoding, callback) {
+        writes += 1;
+        callback(writes === 3 ? writeError : null);
+      }
+    })
+  });
+
+  await assert.rejects(() => writer.onChanged({
+    key: [typed('string', 'SECRET-KEY')], sheetName: 'Data', column: 'value',
+    files: {
+      A: { value: typed('string', 'before'), rowNumber: 2 },
+      B: { value: typed('string', 'after'), rowNumber: 2 }
+    }
+  }), (error) => error === writeError);
+  const aborted = await writer.abort(writeError);
+  const summaryText = await readFile(join(aborted.directory, 'summary.json'), 'utf8');
+
+  assert.deepEqual(await readdir(aborted.directory), ['summary.json']);
+  assert.equal((await readdir(directory)).some((name) => name.endsWith('.tmp')), false);
+  assert.equal(aborted.summary.status, 'FAILED');
+  assert.equal(aborted.summary.code, 'WRITE_FAILED');
+  assert.doesNotMatch(summaryText, /SECRET-WRITE-VALUE|SECRET-KEY|before|after/);
+  assert.equal(summaryText.endsWith('\n'), true);
+});
+
+test('abort scrubs staged details and surfaces an unwritable-parent failure', { skip: process.platform === 'win32' }, async (t) => {
+  const directory = await makeTempDir();
+  t.after(async () => {
+    await chmod(directory, 0o755).catch(() => {});
+    await rm(directory, { recursive: true, force: true });
+  });
+  const writer = await createReportWriter(reportSpec(directory, ['A', 'B']));
+  await writer.onChanged({
+    key: [typed('string', 'SECRET-KEY')], sheetName: 'Data', column: 'value',
+    files: {
+      A: { value: typed('string', 'SECRET-BEFORE'), rowNumber: 2 },
+      B: { value: typed('string', 'SECRET-AFTER'), rowNumber: 2 }
+    }
+  });
+  await chmod(directory, 0o555);
+
+  await assert.rejects(() => writer.abort(new Error('comparison failed')), (error) => error.code === 'EACCES');
+  await chmod(directory, 0o755);
+  const staged = (await readdir(directory)).filter((name) => name.endsWith('.tmp'));
+  for (const name of staged) {
+    const files = await readdir(join(directory, name));
+    for (const file of files) {
+      assert.doesNotMatch(await readFile(join(directory, name, file), 'utf8'), /SECRET-/);
+    }
+  }
+});
+
+test('writeReport surfaces abort publication failures instead of the original detail error', { skip: process.platform === 'win32' }, async (t) => {
+  const directory = await makeTempDir();
+  t.after(async () => {
+    await chmod(directory, 0o755).catch(() => {});
+    await rm(directory, { recursive: true, force: true });
+  });
+  const detailError = new Error('detail iteration failed');
+  const changed = {
+    [Symbol.iterator]() {
+      chmodSync(directory, 0o555);
+      throw detailError;
+    }
+  };
+
+  await assert.rejects(
+    () => writeReport(reportSpec(directory, ['A', 'B']), reportResult({ changed })),
+    (error) => error.code === 'EACCES' && error.cause === detailError
+  );
 });
 
 test('writeReport writes deterministic CSV artifacts and a protected summary', async (t) => {
@@ -315,10 +521,10 @@ test('writeReport writes protected deterministic multiset output only for multis
     [JSON.stringify(['ä']), 'Data', '1', '0', '0', 'ADDED']
   ]);
   assert.deepEqual(report.summary.artifacts, {
-    changed: 'changed.csv',
-    missing: 'missing.csv',
     multiset: 'multiset.csv'
   });
+  await assert.rejects(() => readFile(join(report.directory, 'changed.csv'), 'utf8'));
+  await assert.rejects(() => readFile(join(report.directory, 'missing.csv'), 'utf8'));
 
   const keyReport = await writeReport(reportSpec(directory), reportResult());
   await assert.rejects(() => readFile(join(keyReport.directory, 'multiset.csv'), 'utf8'));
