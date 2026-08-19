@@ -5,9 +5,22 @@ import { fileURLToPath } from 'node:url';
 
 const usage = 'usage: node scripts/sync-skills.mjs [--check] [--root <path>]';
 const defaultRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const targets = [
-  '.agents/skills/excel-diff/SKILL.md',
-  'plugins/excel-diff/skills/excel-diff/SKILL.md'
+const artifacts = [
+  {
+    source: 'skill/SKILL.md',
+    targets: [
+      '.agents/skills/excel-diff/SKILL.md',
+      'plugins/excel-diff/skills/excel-diff/SKILL.md'
+    ]
+  },
+  {
+    source: 'schemas/compare-spec.schema.json',
+    targets: [
+      'skill/references/compare-spec.schema.json',
+      '.agents/skills/excel-diff/references/compare-spec.schema.json',
+      'plugins/excel-diff/skills/excel-diff/references/compare-spec.schema.json'
+    ]
+  }
 ];
 
 function parseArgs(args) {
@@ -26,20 +39,23 @@ function parseArgs(args) {
 
 async function main() {
   const { check, root } = parseArgs(process.argv.slice(2));
-  const source = resolve(root, 'skill/SKILL.md');
-  const expected = await readFile(source);
+  const expected = await Promise.all(artifacts.map(({ source }) => readFile(resolve(root, source))));
   if (check) {
-    for (const target of targets) {
-      let actual;
-      try { actual = await readFile(resolve(root, target)); } catch {}
-      if (!actual?.equals(expected)) throw new Error(`out of sync: ${target}`);
+    for (let index = 0; index < artifacts.length; index += 1) {
+      for (const target of artifacts[index].targets) {
+        let actual;
+        try { actual = await readFile(resolve(root, target)); } catch {}
+        if (!actual?.equals(expected[index])) throw new Error(`out of sync: ${target}`);
+      }
     }
     return;
   }
-  for (const target of targets) {
-    const destination = resolve(root, target);
-    await mkdir(dirname(destination), { recursive: true });
-    await writeFile(destination, expected);
+  for (let index = 0; index < artifacts.length; index += 1) {
+    for (const target of artifacts[index].targets) {
+      const destination = resolve(root, target);
+      await mkdir(dirname(destination), { recursive: true });
+      await writeFile(destination, expected[index]);
+    }
   }
 }
 

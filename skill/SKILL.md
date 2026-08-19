@@ -25,7 +25,7 @@ Inspect first, resolve ambiguity with the user, then compare from a validated Co
    - `NEEDS_INPUT`: explain its code and ask for the missing decision. Do not compare yet.
    - `FAILED`: quote the code and message; do not claim success. For `SHEET_NOT_FOUND`, present the sheets listed in the error and ask the user to choose.
 5. Do not treat sampled key candidates or observed field changes as reliable business conclusions. If the sheet, key, column mapping, or duplicate header is ambiguous, wait for explicit confirmation before comparing.
-6. Express the confirmed rules only with fields supported by `schemas/compare-spec.schema.json`. Run:
+6. Read the [bundled CompareSpec schema](references/compare-spec.schema.json), then express the confirmed rules using only its supported fields. Run:
 
    ```sh
    excel-diff compare --spec "/abs/compare.json"
