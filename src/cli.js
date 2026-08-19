@@ -4,6 +4,7 @@ import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { CompareError, comparePartitioned } from './compare.js';
+import { inspectFiles } from './inspect.js';
 import { PartitionError } from './partitions.js';
 import { InputError } from './read-xlsx.js';
 import { createReportWriter } from './report.js';
@@ -16,10 +17,10 @@ class UsageError extends Error {
   }
 }
 
-function parseArgs(args) {
-  if (args[0] !== 'compare') {
-    throw new UsageError('usage: excel-diff compare --spec <path> [--progress] [--keep-temp]');
-  }
+const compareUsage = 'usage: excel-diff compare --spec <path> [--progress] [--keep-temp]';
+const inspectUsage = 'usage: excel-diff inspect --files <a.xlsx> <b.xlsx> [more.xlsx...] --sheet <name> [--full-types]';
+
+function parseCompareArgs(args) {
   let path;
   let progress = false;
   let keepTemp = false;
@@ -27,14 +28,40 @@ function parseArgs(args) {
     const argument = args[index];
     if (argument === '--spec' && path === undefined) {
       path = args[index + 1];
-      if (!path || path.startsWith('--')) throw new UsageError('usage: excel-diff compare --spec <path> [--progress] [--keep-temp]');
+      if (!path || path.startsWith('--')) throw new UsageError(compareUsage);
       index += 1;
     } else if (argument === '--progress' && !progress) progress = true;
     else if (argument === '--keep-temp' && !keepTemp) keepTemp = true;
-    else throw new UsageError('usage: excel-diff compare --spec <path> [--progress] [--keep-temp]');
+    else throw new UsageError(compareUsage);
   }
-  if (path === undefined) throw new UsageError('usage: excel-diff compare --spec <path> [--progress] [--keep-temp]');
-  return { path, progress, keepTemp };
+  if (path === undefined) throw new UsageError(compareUsage);
+  return { command: 'compare', path, progress, keepTemp };
+}
+
+function parseInspectArgs(args) {
+  let files;
+  let sheet;
+  let fullTypes = false;
+  for (let index = 1; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === '--files' && files === undefined) {
+      files = [];
+      while (args[index + 1] && !args[index + 1].startsWith('--')) files.push(args[index += 1]);
+    } else if (argument === '--sheet' && sheet === undefined) {
+      sheet = args[index + 1];
+      if (!sheet || sheet.startsWith('--')) throw new UsageError(inspectUsage);
+      index += 1;
+    } else if (argument === '--full-types' && !fullTypes) fullTypes = true;
+    else throw new UsageError(inspectUsage);
+  }
+  if (files?.length < 2 || sheet === undefined) throw new UsageError(inspectUsage);
+  return { command: 'inspect', files, sheet, fullTypes };
+}
+
+function parseArgs(args) {
+  if (args[0] === 'compare') return parseCompareArgs(args);
+  if (args[0] === 'inspect') return parseInspectArgs(args);
+  throw new UsageError(`${compareUsage}; ${inspectUsage}`);
 }
 
 export function failure(error) {
@@ -61,6 +88,21 @@ async function writeJsonLine(stream, value) {
 
 export async function main(args, dependencies = {}) {
   const options = parseArgs(args);
+  if (options.command === 'inspect') {
+    const result = await inspectFiles(options.files, { sheet: options.sheet, fullTypes: options.fullTypes });
+    const files = result.files.flatMap((file) => {
+      const duplicates = file.risks
+        .filter(({ code }) => code === 'HEADER_DUPLICATED')
+        .map(({ normalized, columns }) => ({ normalized, columns }));
+      return duplicates.length === 0 ? [] : [{ file: file.file, sheet: file.sheet.name, duplicates }];
+    });
+    await writeJsonLine(process.stdout, files.length === 0 ? result : {
+      status: 'NEEDS_INPUT',
+      code: 'HEADER_DUPLICATED',
+      files
+    });
+    return files.length === 0 ? 0 : 3;
+  }
   const spec = await loadSpec(options.path);
   const report = await (dependencies.createReportWriter ?? createReportWriter)(spec);
   let latestProgress;
@@ -94,6 +136,7 @@ export async function main(args, dependencies = {}) {
       directory: completed.directory,
       ...(result.tempDirectory ? { tempDirectory: result.tempDirectory } : {})
     });
+    return 0;
   } catch (error) {
     if (result?.tempDirectory && error && (typeof error === 'object' || typeof error === 'function')
       && error.tempDirectory == null) {
@@ -111,9 +154,11 @@ try {
   if (error.code !== 'ENOENT') throw error;
 }
 if (invokedDirectly) {
-  main(process.argv.slice(2)).catch((error) => {
-    const { exitCode, output } = failure(error);
-    process.stderr.write(`${JSON.stringify(output)}\n`);
-    process.exitCode = exitCode;
-  });
+  main(process.argv.slice(2))
+    .then((exitCode) => { process.exitCode = exitCode; })
+    .catch((error) => {
+      const { exitCode, output } = failure(error);
+      process.stderr.write(`${JSON.stringify(output)}\n`);
+      process.exitCode = exitCode;
+    });
 }

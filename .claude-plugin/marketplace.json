@@ -1,0 +1,14 @@
+{
+  "name": "excel-diff-tools",
+  "owner": {
+    "name": "Excel Diff Maintainers"
+  },
+  "plugins": [
+    {
+      "name": "excel-diff",
+      "source": "./plugins/excel-diff",
+      "version": "0.1.0",
+      "description": "Inspect and compare two or more XLSX workbooks with structured results."
+    }
+  ]
+}

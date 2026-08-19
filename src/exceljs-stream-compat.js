@@ -171,7 +171,7 @@ function addressInRange(address, reference) {
   return cell.row >= range.top && cell.row <= range.bottom && cell.col >= range.left && cell.col <= range.right;
 }
 
-async function* transformWorksheet(iterator, formulaResults) {
+async function* transformWorksheet(iterator, formulaResults, worksheetStats) {
   const decoder = new StringDecoder('utf8');
   const masters = new Map();
   const expiringMasters = new Map();
@@ -205,6 +205,7 @@ async function* transformWorksheet(iterator, formulaResults) {
         break;
       }
       const tag = buffer.slice(0, tagEnd + 1);
+      if (/^<mergeCell(?:\s|\/>)/.test(tag)) worksheetStats.mergeCount += 1;
       if (/^<row(?:\s|>)/.test(tag)) rowNumber = Number(xmlAttribute(tag, 'r'));
       if (/^<c(?:\s|>)/.test(tag)) {
         cellAddress = xmlAttribute(tag, 'r');
@@ -350,13 +351,16 @@ export async function openStreamingWorkbook(filePath, sheetName, options = {}) {
     const hyperlinks = await readHyperlinks(entries, workbook, sheetName, check);
     check();
     const formulaResults = new Map();
+    const worksheetStats = { mergeCount: 0 };
     return {
       workbook,
       tempDirectory: sharedStrings?.directory,
       get tempBytes() { return sharedStrings?.bytes ?? 0; },
+      get mergeCount() { return worksheetStats.mergeCount; },
       close: async () => sharedStrings?.close(),
       prepareWorksheet(sheet) {
-        sheet.iterator = transformWorksheet(sheet.iterator, formulaResults);
+        worksheetStats.mergeCount = 0;
+        sheet.iterator = transformWorksheet(sheet.iterator, formulaResults, worksheetStats);
       },
       cellValue(cell) {
         const formula = cell.formula;

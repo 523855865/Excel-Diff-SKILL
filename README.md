@@ -1,15 +1,45 @@
 # Excel Diff
 
-使用 Node.js 24 流式比较两份或多份 Excel `.xlsx` 文件。先安装依赖：
+要求 Node.js 24，用于流式检查和比较两份或多份 Excel `.xlsx` 文件。
+
+macOS/Linux：
 
 ```sh
 npm ci
-node src/cli.js compare --spec /absolute/path/to/compare.json [--progress] [--keep-temp]
+npm install --global .
 ```
 
-也可通过安装后的命令运行：`excel-diff compare --spec /absolute/path/to/compare.json`。`compare` 之后的 `--spec`、`--progress` 和 `--keep-temp` 可以任意顺序出现。
+Windows PowerShell：
+
+```powershell
+npm ci
+npm install --global .
+```
+
+## Inspect
+
+先检查工作表、表头、类型分布、空值率、候选键及公式、合并单元格和重复表头风险：
+
+```sh
+excel-diff inspect --files /absolute/path/before.xlsx /absolute/path/after.xlsx --sheet 人员
+```
+
+默认对前 10,000 个数据行统计类型；需要扫描全部数据行的类型时增加 `--full-types`。发现重复表头时，命令输出 `NEEDS_INPUT`，应先确认列映射再比较。
+
+Windows PowerShell 调用示例：
+
+```powershell
+excel-diff inspect --files "C:\work\before.xlsx" "C:\work\after.xlsx" --sheet "人员" --full-types
+excel-diff compare --spec "C:\work\compare.json"
+```
 
 ## CompareSpec
+
+```sh
+excel-diff compare --spec /absolute/path/to/compare.json [--progress] [--keep-temp]
+```
+
+`compare` 之后的 `--spec`、`--progress` 和 `--keep-temp` 可以任意顺序出现。
 
 路径相对于 JSON 文件所在目录解析。完整的两文件 `key` 模式示例如下：
 
@@ -67,10 +97,34 @@ node src/cli.js compare --spec /absolute/path/to/compare.json [--progress] [--ke
 npm test
 ```
 
+## Agent 集成
+
+Codex 在仓库内通过 `.agents/skills/excel-diff/SKILL.md` 发现此 Skill；唯一维护源是 `skill/SKILL.md`。修改后同步并检查副本：
+
+```sh
+node scripts/sync-skills.mjs
+node scripts/sync-skills.mjs --check
+```
+
+Claude Code 开发时可直接加载本地插件：
+
+```sh
+claude --plugin-dir ./plugins/excel-diff
+claude plugin validate ./plugins/excel-diff
+```
+
+也可在 Claude Code 内添加本地仓库路径或远程仓库 URL，再安装插件（本仓库不声明已发布到远程 marketplace）：
+
+```text
+/plugin marketplace add <repo-path-or-url>
+/plugin install excel-diff@excel-diff-tools
+```
+
 | 退出码 | 含义 |
 | --- | --- |
-| 0 | 比较完成 |
+| 0 | 检查或比较完成 |
 | 2 | 命令用法或 CompareSpec 无效 |
+| 3 | 检查发现歧义，需要输入（`NEEDS_INPUT`） |
 | 4 | 输入文件或比较错误 |
 | 5 | 资源限制超出，或磁盘空间/配额耗尽（`DISK_FULL`） |
 | 6 | 未预期内部错误 |
