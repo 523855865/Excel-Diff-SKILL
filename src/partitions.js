@@ -2,13 +2,15 @@ import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdir, mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, sep } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline';
 import { finished } from 'node:stream/promises';
 
 const budgetOption = Symbol('budget');
 const trackerOption = Symbol('tracker');
 const pathTrackers = new Map();
+
+const keyHashOf = (record) => Array.isArray(record) ? record[0] : record?.keyHash;
 
 export const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 
@@ -84,7 +86,7 @@ export class PartitionStore {
   #tracker;
 
   static async create(options = {}) {
-    const parent = options.root ?? tmpdir();
+    const parent = resolve(options.root ?? tmpdir());
     if (options.root) await mkdir(parent, { recursive: true });
     return new PartitionStore(await mkdtemp(join(parent, 'excel-diff-')), options);
   }
@@ -102,12 +104,16 @@ export class PartitionStore {
     return this.#streams.size;
   }
 
+  get directory() {
+    return resolve(this.#root);
+  }
+
   openPartitionPaths() {
     return [...this.#streams.keys()].sort();
   }
 
   async append(record, depth = 0) {
-    const bucket = record?.keyHash?.slice(depth * 2, depth * 2 + 2);
+    const bucket = keyHashOf(record)?.slice(depth * 2, depth * 2 + 2);
     if (!/^[0-9a-f]{2}$/.test(bucket)) {
       throw new PartitionError('PARTITION_INVALID', 'record has an invalid keyHash');
     }
@@ -231,8 +237,9 @@ async function splitPartition(path, depth, context) {
     let firstHash;
     let mixedHashes = false;
     for await (const record of readPartition(path)) {
-      firstHash ??= record.keyHash;
-      if (record.keyHash !== firstHash) mixedHashes = true;
+      const keyHash = keyHashOf(record);
+      firstHash ??= keyHash;
+      if (keyHash !== firstHash) mixedHashes = true;
       await children.append(record, depth);
     }
     await children.close();
@@ -247,7 +254,7 @@ async function splitPartition(path, depth, context) {
     await rm(path);
     context.budget.release(parentSize);
     forgetPath(path, context.tracker);
-    return boundedPaths.sort();
+    return boundedPaths;
   } catch (error) {
     await children?.close().catch(() => {});
     throw error;

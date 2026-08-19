@@ -171,7 +171,7 @@ function resolveColumns(row, file, spec, standardColumns) {
   return { columns, mapping };
 }
 
-export async function scanFileRows(file, spec, standardColumns = null, onRow = async () => {}) {
+export async function scanFileRows(file, spec, standardColumns = null, onRow = async () => {}, onScan = async () => {}) {
   const availableSheets = [];
   let columns;
   let mapping;
@@ -213,7 +213,16 @@ export async function scanFileRows(file, spec, standardColumns = null, onRow = a
     }
     matchedRows += 1;
     try {
-      await onRow({ fileId: file.id, sheetName, rowNumber, values });
+      await onRow({ fileId: file.id, sheetName, rowNumber, values }, columns);
+    } catch (error) {
+      callbackFailure = error;
+      throw error;
+    }
+  };
+
+  const reportScan = async (rowNumber, cellCount) => {
+    try {
+      await onScan({ fileId: file.id, rowNumber, cellCount });
     } catch (error) {
       callbackFailure = error;
       throw error;
@@ -237,9 +246,11 @@ export async function scanFileRows(file, spec, standardColumns = null, onRow = a
           if (columns === undefined) ({ columns, mapping } = resolveColumns(null, file, spec, standardColumns));
           for (let rowNumber = previousRowNumber + 1; rowNumber < row.number; rowNumber += 1) {
             totalRowsScanned += 1;
+            await reportScan(rowNumber, 0);
             await processRow({ getCell: () => ({ value: null }) }, rowNumber, sheet.name);
           }
           totalRowsScanned += 1;
+          await reportScan(row.number, row.cellCount);
           await processRow(row, row.number, sheet.name);
           previousRowNumber = row.number;
         } finally {

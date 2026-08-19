@@ -51,6 +51,26 @@ test('writes records to sorted default-depth partitions and preserves them', asy
   assert.equal(records.every(({ keyHash }) => keyHash.length === 64), true);
 });
 
+test('routes compact tuple records by their first hash field', async (t) => {
+  const store = await PartitionStore.create();
+  t.after(() => store.cleanup());
+  const tuple = [sha256('tuple'), 'encoded', [['string', 'tuple']], 'A', '人员', 2, sha256('[]'), []];
+
+  await store.append(tuple);
+  await store.close();
+
+  assert.deepEqual(await collect(store.partitionPaths()[0]), [tuple]);
+});
+
+test('exposes its absolute run directory before any partition exists', async (t) => {
+  const store = await PartitionStore.create();
+  t.after(() => store.cleanup());
+
+  assert.equal(store.directory.startsWith('/'), true);
+  assert.deepEqual(store.partitionPaths(), []);
+  assert.equal(store.root, undefined);
+});
+
 test('reopens least-recently-used buckets when maxOpenFiles is two', async (t) => {
   const keysByBucket = new Map();
   for (let index = 0; keysByBucket.size < 3; index += 1) {

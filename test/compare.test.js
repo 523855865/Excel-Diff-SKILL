@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import ExcelJS from 'exceljs';
-import { rm } from 'node:fs/promises';
+import { access, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { compare, CompareError } from '../src/compare.js';
+import { compare, comparePartitioned, CompareError } from '../src/compare.js';
+import { encodeKey } from '../src/normalize.js';
+import { sha256 } from '../src/partitions.js';
 import { makeTempDir, writeWorkbook } from './helpers.js';
 
 function spec(directory, files, overrides = {}) {
@@ -103,6 +105,296 @@ test('aggregates typed keys, classifies rows, and preserves file and field order
     }
   });
   assert.deepEqual(Object.keys(result.changed[1].files), ['C', 'A', 'B']);
+});
+
+test('streams details to awaited sinks without retaining them in the result', async (t) => {
+  const { directory, files } = await filesFor(t, {
+    A: [['编号', '姓名'], ['1', 'before'], ['2', 'deleted'], ['4', 'duplicate']],
+    B: [['编号', '姓名'], ['1', 'after'], ['3', 'added'], ['4', 'duplicate'], ['4', 'again']]
+  }, ['A', 'B']);
+  const details = { changed: [], missing: [], duplicates: [] };
+
+  const result = await comparePartitioned(spec(directory, files, {
+    filters: [],
+    columnAliases: {}
+  }), {
+    onChanged: async (item) => details.changed.push(item),
+    onMissing: async (item) => details.missing.push(item),
+    onDuplicate: async (item) => details.duplicates.push(item)
+  });
+
+  assert.deepEqual(Object.keys(result), ['summary']);
+  assert.deepEqual(result.summary, {
+    files: 2,
+    totalRowsScanned: 7,
+    matchedRows: 7,
+    identicalKeys: 0,
+    changedKeys: 1,
+    missingKeys: 2,
+    duplicateKeys: 1,
+    invalidRows: 0
+  });
+  assert.deepEqual(details.changed.map(({ key, column }) => [key, column]), [[[['string', '1']], '姓名']]);
+  assert.deepEqual(details.missing.map(({ key }) => key), [[['string', '2']], [['string', '3']]]);
+  assert.deepEqual(details.duplicates, [{ key: [['string', '4']], files: ['B'] }]);
+});
+
+test('enforces all five resource limits without leaking cell values', async (t) => {
+  const secret = 'RESOURCE-SECRET-001';
+  const { directory, files } = await filesFor(t, {
+    A: [['编号', '姓名'], [secret, 'before'], ['2', 'same']],
+    B: [['编号', '姓名'], [secret, 'after'], ['2', 'same']]
+  }, ['A', 'B']);
+  const rules = spec(directory, files, { filters: [], columnAliases: {} });
+  const cases = [
+    ['ROW_LIMIT_EXCEEDED', { maxRows: 1 }],
+    ['CELL_LIMIT_EXCEEDED', { maxCells: 1 }],
+    ['INPUT_LIMIT_EXCEEDED', { maxInputBytes: 1 }],
+    ['TEMP_LIMIT_EXCEEDED', { maxTempBytes: 1 }]
+  ];
+  for (const [code, resources] of cases) {
+    await assert.rejects(
+      () => comparePartitioned({ ...rules, resources }),
+      (error) => error.code === code && !error.message.includes(secret)
+    );
+  }
+  const ticks = [0, 2];
+  await assert.rejects(
+    () => comparePartitioned({ ...rules, resources: { maxRuntimeMs: 1 } }, {}, { now: () => ticks.shift() ?? 2 }),
+    (error) => error.code === 'RUNTIME_LIMIT_EXCEEDED' && !error.message.includes(secret)
+  );
+});
+
+test('keeps an accessible temp directory on success and failure only when requested', async (t) => {
+  const { directory, files } = await filesFor(t, {
+    A: [['编号'], ['1']],
+    B: [['编号'], ['1']]
+  }, ['A', 'B']);
+  const rules = spec(directory, files, { filters: [], columnAliases: {} });
+
+  const result = await comparePartitioned(rules, {}, { keepTemp: true });
+  await access(result.tempDirectory);
+  const [partitionName] = await readdir(result.tempDirectory);
+  const rawRecords = (await readFile(join(result.tempDirectory, partitionName), 'utf8')).trim().split('\n');
+  assert.equal(rawRecords.every((line) => Array.isArray(JSON.parse(line)) && JSON.parse(line).length === 8), true);
+  assert.equal(/编号|rowBytes|keyHash|fileId/.test(rawRecords.join('\n')), false);
+  await rm(result.tempDirectory, { recursive: true, force: true });
+
+  let failure;
+  try {
+    await comparePartitioned({ ...rules, resources: { maxRows: 1 } }, {}, { keepTemp: true });
+  } catch (error) {
+    failure = error;
+  }
+  assert.equal(failure.code, 'ROW_LIMIT_EXCEEDED');
+  await access(failure.tempDirectory);
+  await rm(failure.tempDirectory, { recursive: true, force: true });
+});
+
+test('enforces maxRuntimeMs after awaited sink processing', async (t) => {
+  const { directory, files } = await filesFor(t, {
+    A: [['编号'], ['1']],
+    B: [['编号']]
+  }, ['A', 'B']);
+  let expired = false;
+
+  await assert.rejects(
+    () => comparePartitioned(
+      spec(directory, files, {
+        filters: [],
+        columnAliases: {},
+        resources: { maxRuntimeMs: 1 }
+      }),
+      { onMissing: async () => { expired = true; } },
+      { now: () => expired ? 2 : 0 }
+    ),
+    (error) => error.code === 'RUNTIME_LIMIT_EXCEEDED'
+  );
+});
+
+test('enforces maxRuntimeMs after the final identical fast-path comparison', async (t) => {
+  const { directory, files } = await filesFor(t, {
+    A: [['编号', '姓名'], ['1', 'same']],
+    B: [['编号', '姓名'], ['1', 'same']]
+  }, ['A', 'B']);
+  let clockReads = 0;
+
+  await assert.rejects(
+    () => comparePartitioned(
+      spec(directory, files, {
+        filters: [],
+        columnAliases: {},
+        resources: { maxRuntimeMs: 1 }
+      }),
+      {},
+      { now: () => ++clockReads >= 13 ? 2 : 0 }
+    ),
+    (error) => error.code === 'RUNTIME_LIMIT_EXCEEDED'
+  );
+});
+
+test('enforces maxRuntimeMs before a successful empty return', async (t) => {
+  const { directory, files } = await filesFor(t, {
+    A: [['编号']],
+    B: [['编号']]
+  }, ['A', 'B']);
+  let clockReads = 0;
+
+  await assert.rejects(
+    () => comparePartitioned(
+      spec(directory, files, {
+        filters: [],
+        columnAliases: {},
+        resources: { maxRuntimeMs: 1 }
+      }),
+      {},
+      { now: () => ++clockReads >= 4 ? 2 : 0 }
+    ),
+    (error) => error.code === 'RUNTIME_LIMIT_EXCEEDED'
+  );
+});
+
+test('propagates sink failures unchanged', async (t) => {
+  const { directory, files } = await filesFor(t, {
+    A: [['编号', '姓名'], ['1', 'before']],
+    B: [['编号', '姓名'], ['1', 'after']]
+  }, ['A', 'B']);
+  const sentinel = new Error('sink stopped');
+
+  await assert.rejects(
+    () => comparePartitioned(spec(directory, files, { filters: [], columnAliases: {} }), {
+      onChanged: async () => { throw sentinel; }
+    }),
+    (error) => error === sentinel
+  );
+});
+
+test('cleans temporary partitions after success and unchanged sink failures', async (t) => {
+  const { directory, files } = await filesFor(t, {
+    A: [['编号', '姓名'], ['1', 'before']],
+    B: [['编号', '姓名'], ['1', 'after']]
+  }, ['A', 'B']);
+  const tempRoot = join(directory, 'partitions');
+  await mkdir(tempRoot);
+  const previousTmp = process.env.TMPDIR;
+  process.env.TMPDIR = tempRoot;
+  try {
+    const rules = spec(directory, files, { filters: [], columnAliases: {} });
+    await comparePartitioned(rules);
+    assert.deepEqual(await readdir(tempRoot), []);
+
+    const sentinel = new Error('sink cleanup sentinel');
+    await assert.rejects(
+      () => comparePartitioned(rules, { onChanged: async () => { throw sentinel; } }),
+      (error) => error === sentinel
+    );
+    assert.deepEqual(await readdir(tempRoot), []);
+  } finally {
+    if (previousTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTmp;
+  }
+});
+
+test('awaits non-sensitive progress in baseline-first scan order', async (t) => {
+  const { directory, files } = await filesFor(t, {
+    A: [['编号'], ['1']],
+    B: [['编号'], ['1']]
+  }, ['B', 'A']);
+  const progress = [];
+
+  await comparePartitioned(
+    spec(directory, files, { filters: [], columnAliases: {} }),
+    {},
+    { onProgress: async (item) => { await Promise.resolve(); progress.push(item); } }
+  );
+
+  assert.deepEqual(progress.map(({ rowsScanned, currentFile }) => [rowsScanned, currentFile]), [[1, 'A'], [2, 'B']]);
+  assert.equal(progress.every((item) => Object.keys(item).join(',') === 'rowsScanned,currentFile,bytesWritten'), true);
+});
+
+test('repartitions colliding buckets while preserving duplicate report and fail policies', async (t) => {
+  const buckets = new Map();
+  let keys;
+  for (let index = 0; keys === undefined; index += 1) {
+    const key = String(index);
+    const hash = sha256(encodeKey([['string', key]]));
+    const previous = buckets.get(hash.slice(0, 2));
+    if (previous && previous.hash.slice(2, 4) !== hash.slice(2, 4)) keys = [previous.key, key];
+    else buckets.set(hash.slice(0, 2), { hash, key });
+  }
+  const [duplicateKey, identicalKey] = keys;
+  const { directory, files } = await filesFor(t, {
+    A: [['编号', '姓名'], [duplicateKey, 'duplicate'], [identicalKey, 'same']],
+    B: [['编号', '姓名'], [duplicateKey, 'duplicate'], [duplicateKey, 'again'], [identicalKey, 'same']]
+  }, ['A', 'B']);
+  const rules = spec(directory, files, {
+    filters: [],
+    columnAliases: {},
+    resources: { maxPartitionBytes: 1_200, maxTempBytes: 1_000_000 }
+  });
+
+  const reported = await compare(rules);
+  assert.equal(reported.summary.identicalKeys, 1);
+  assert.equal(reported.summary.duplicateKeys, 1);
+  assert.deepEqual(reported.duplicates, [{ key: [['string', duplicateKey]], files: ['B'] }]);
+
+  await assert.rejects(
+    () => compare({ ...rules, duplicateKeyPolicy: 'fail' }),
+    (error) => error instanceof CompareError && error.code === 'DUPLICATE_KEY'
+  );
+});
+
+test('emits recursively repartitioned sink records in stable logical hash order', async (t) => {
+  const byFirst = new Map();
+  let selected;
+  for (let index = 0; selected === undefined; index += 1) {
+    const key = String(index);
+    const hash = sha256(encodeKey([['string', key]]));
+    const first = hash.slice(0, 2);
+    const second = hash.slice(2, 4);
+    const group = byFirst.get(first) ?? new Map();
+    const peers = group.get(second) ?? [];
+    peers.push({ key, hash });
+    group.set(second, peers);
+    byFirst.set(first, group);
+    const nested = [...group.values()].find((items) => items.length >= 2 && items[0].hash.slice(4, 6) !== items[1].hash.slice(4, 6));
+    const sibling = [...group.entries()].find(([bucket]) => bucket !== second)?.[1]?.[0];
+    if (nested && sibling) selected = [nested[0], nested[1], sibling];
+  }
+  const expected = [...selected].sort((left, right) => left.hash.localeCompare(right.hash)).map(({ key }) => key);
+  const { directory, files } = await filesFor(t, {
+    A: [['编号', '姓名'], ...selected.map(({ key }) => [key, 'x'.repeat(80)])],
+    B: [['编号', '姓名']]
+  }, ['A', 'B']);
+  const rules = spec(directory, files, {
+    filters: [],
+    columnAliases: {},
+    resources: { maxPartitionBytes: 550, maxTempBytes: 1_000_000 }
+  });
+
+  const runs = [];
+  for (let run = 0; run < 5; run += 1) {
+    const keys = [];
+    await comparePartitioned(rules, { onMissing: async ({ key }) => keys.push(key[0][1]) });
+    runs.push(keys);
+  }
+
+  assert.deepEqual(runs, Array.from({ length: 5 }, () => expected));
+});
+
+test('preserves canonical numeric-like header order in star comparisons', async (t) => {
+  const { directory, files } = await filesFor(t, {
+    A: [['id', '10', '2'], ['001', 'before-ten', 'before-two']],
+    B: [['id', '10', '2'], ['001', 'after-ten', 'after-two']]
+  }, ['A', 'B']);
+
+  const result = await compare(spec(directory, files, {
+    mode: { type: 'key', keyColumns: ['id'] },
+    filters: [],
+    columnAliases: {}
+  }));
+
+  assert.deepEqual(result.changed.map(({ column }) => column), ['10', '2']);
 });
 
 test('redacts sensitive duplicate keys and classifies duplicates before missing rows', async (t) => {

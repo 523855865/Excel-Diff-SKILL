@@ -67,6 +67,23 @@ test('reads typed values with Excel provenance and physical row counts', async (
   ]);
 });
 
+test('passes canonical numeric-like header order to row callbacks', async (t) => {
+  const file = await fixture(t, [
+    ['id', '10', '2'],
+    ['001', 'ten', 'two']
+  ]);
+  let callbackColumns;
+
+  await scanFileRows(
+    file,
+    spec({ mode: { type: 'key', keyColumns: ['id'] } }),
+    null,
+    async (_row, columns) => { callbackColumns = columns; }
+  );
+
+  assert.deepEqual(callbackColumns, ['id', '10', '2']);
+});
+
 test('filters normalized strings, numbers, and dates while retaining scan counts', async (t) => {
   const file = await fixture(t, [
     ['编号', '状态', '金额', '日期'],
@@ -188,6 +205,61 @@ test('propagates callback errors exactly and stops before later rows', async (t)
     () => scanFileRows(file, spec(), null, async (record) => {
       seen.push(record.rowNumber);
       if (record.rowNumber === 3) throw sentinel;
+    }),
+    (error) => error === sentinel
+  );
+  assert.deepEqual(seen, [2, 3]);
+});
+
+test('reports every scanned row to onScan, including gaps, filtered rows, and invalid keys', async (t) => {
+  const directory = await makeTempDir();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = { id: 'before', path: join(directory, 'scan-metadata.xlsx') };
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('人员');
+  sheet.addRow(['编号', '状态']);
+  sheet.addRow(['filtered', '离职']);
+  sheet.getCell('B4').value = '在职';
+  sheet.getCell('A5').value = 'matched';
+  sheet.getCell('B5').value = '在职';
+  await workbook.xlsx.writeFile(file.path);
+  const seen = [];
+
+  const result = await scanFileRows(
+    file,
+    spec({ filters: [{ column: '状态', operator: 'eq', value: '在职' }] }),
+    null,
+    async () => {},
+    async (metadata) => seen.push(metadata)
+  );
+
+  assert.equal(result.totalRowsScanned, 4);
+  assert.equal(result.invalidRows, 1);
+  assert.deepEqual(seen, [
+    { fileId: 'before', rowNumber: 2, cellCount: 2 },
+    { fileId: 'before', rowNumber: 3, cellCount: 0 },
+    { fileId: 'before', rowNumber: 4, cellCount: 2 },
+    { fileId: 'before', rowNumber: 5, cellCount: 2 }
+  ]);
+});
+
+test('propagates onScan failures exactly', async (t) => {
+  const directory = await makeTempDir();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = { id: 'before', path: join(directory, 'scan-gap-failure.xlsx') };
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('人员');
+  sheet.addRow(['编号']);
+  sheet.addRow(['001']);
+  sheet.getCell('A4').value = '002';
+  await workbook.xlsx.writeFile(file.path);
+  const sentinel = new Error('stop resource accounting');
+  const seen = [];
+
+  await assert.rejects(
+    () => scanFileRows(file, spec(), null, async () => {}, async ({ rowNumber }) => {
+      seen.push(rowNumber);
+      if (rowNumber === 3) throw sentinel;
     }),
     (error) => error === sentinel
   );
