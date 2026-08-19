@@ -71,6 +71,33 @@ test('exposes its absolute run directory before any partition exists', async (t)
   assert.equal(store.root, undefined);
 });
 
+test('external temporary bytes share the partition live budget', async (t) => {
+  const store = await PartitionStore.create({ maxTempBytes: 200 });
+  t.after(() => store.cleanup());
+  store.reserveExternal(199);
+
+  await assert.rejects(() => store.append(record('blocked')), (error) => error.code === 'TEMP_LIMIT_EXCEEDED');
+  store.releaseExternal(199);
+  await store.append(record('allowed'));
+});
+
+test('external releases cannot erase partition bytes or bypass byte validation', async (t) => {
+  const store = await PartitionStore.create({ maxTempBytes: 100 });
+  t.after(() => store.cleanup());
+  await store.append([sha256('first')]);
+
+  for (const bytes of [0, -1, 1.5]) {
+    assert.throws(() => store.reserveExternal(bytes), RangeError);
+    assert.throws(() => store.releaseExternal(bytes), RangeError);
+  }
+  assert.throws(() => store.releaseExternal(100), RangeError);
+  await assert.rejects(() => store.append([sha256('second')]), (error) => error.code === 'TEMP_LIMIT_EXCEEDED');
+
+  store.reserveExternal(10);
+  assert.throws(() => store.releaseExternal(11), RangeError);
+  store.releaseExternal(10);
+});
+
 test('reopens least-recently-used buckets when maxOpenFiles is two', async (t) => {
   const keysByBucket = new Map();
   for (let index = 0; keysByBucket.size < 3; index += 1) {

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { compare, comparePartitioned, CompareError } from '../src/compare.js';
+import { openStreamingWorkbook } from '../src/exceljs-stream-compat.js';
 import { encodeKey } from '../src/normalize.js';
 import { sha256 } from '../src/partitions.js';
 import { makeTempDir, writeWorkbook } from './helpers.js';
@@ -164,6 +165,47 @@ test('enforces all five resource limits without leaking cell values', async (t) 
     () => comparePartitioned({ ...rules, resources: { maxRuntimeMs: 1 } }, {}, { now: () => ticks.shift() ?? 2 }),
     (error) => error.code === 'RUNTIME_LIMIT_EXCEEDED' && !error.message.includes(secret)
   );
+});
+
+test('enforces runtime inside workbook preprocessing before temp spooling', async (t) => {
+  const { directory, files } = await filesFor(t, {
+    A: [['编号'], ['one']],
+    B: [['编号'], ['one']]
+  }, ['A', 'B']);
+  let ticks = 0;
+
+  await assert.rejects(
+    () => comparePartitioned(spec(directory, files, {
+      filters: [], columnAliases: {},
+      resources: { maxRuntimeMs: 1, maxTempBytes: 1 }
+    }), {}, { now: () => ++ticks < 4 ? 0 : 2 }),
+    (error) => error.code === 'RUNTIME_LIMIT_EXCEEDED'
+  );
+});
+
+test('charges a real shared-string spool and partitions to one temp budget', async (t) => {
+  const rows = [
+    ['编号', '姓名', '状态'],
+    ...Array.from({ length: 500 }, (_, index) => [`filtered-${index}`, `unique-${index}`, 'inactive']),
+    ['active', 'small', 'active']
+  ];
+  const { directory, files } = await filesFor(t, { A: rows, B: rows }, ['A', 'B']);
+  const probe = await openStreamingWorkbook(files[0].path, '人员');
+  const spoolBytes = probe.tempBytes;
+  await probe.close();
+  let scanned = 0;
+
+  await assert.rejects(
+    () => comparePartitioned(spec(directory, files, {
+      mode: { type: 'key', keyColumns: ['编号'] },
+      compareColumns: ['姓名'],
+      filters: [{ column: '状态', operator: 'eq', value: 'active' }],
+      columnAliases: {},
+      resources: { maxTempBytes: spoolBytes }
+    }), {}, { onProgress: async () => { scanned += 1; } }),
+    (error) => error.code === 'TEMP_LIMIT_EXCEEDED'
+  );
+  assert.equal(scanned, rows.length - 1);
 });
 
 test('keeps an accessible temp directory on success and failure only when requested', async (t) => {

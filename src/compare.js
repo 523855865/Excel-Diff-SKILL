@@ -206,7 +206,7 @@ export async function comparePartitioned(spec, sink = {}, options = {}) {
           bytesWritten: store.bytesWritten
         });
         enforceRuntime();
-      });
+      }, { tempBudget: store, check: enforceRuntime });
       columns ??= result.columns;
       compareColumns ??= comparisonColumns(spec, columns);
       const selected = new Set(compareColumns);

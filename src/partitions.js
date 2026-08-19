@@ -29,6 +29,7 @@ class LiveByteBudget {
   }
 
   reserve(bytes) {
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new RangeError('temporary byte count must be a positive integer');
     if (this.liveBytes + bytes > this.limit) {
       throw new PartitionError('TEMP_LIMIT_EXCEEDED', 'temporary data exceeds resources.maxTempBytes');
     }
@@ -36,6 +37,9 @@ class LiveByteBudget {
   }
 
   release(bytes) {
+    if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes > this.liveBytes) {
+      throw new RangeError('temporary byte release exceeds live bytes');
+    }
     this.liveBytes -= bytes;
   }
 }
@@ -78,6 +82,7 @@ async function trackedBytes(tracker) {
 
 export class PartitionStore {
   #budget;
+  #externalBytes = 0;
   #filePrefix;
   #maxOpenFiles;
   #paths = new Set();
@@ -110,6 +115,19 @@ export class PartitionStore {
 
   openPartitionPaths() {
     return [...this.#streams.keys()].sort();
+  }
+
+  reserveExternal(bytes) {
+    this.#budget.reserve(bytes);
+    this.#externalBytes += bytes;
+  }
+
+  releaseExternal(bytes) {
+    if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes > this.#externalBytes) {
+      throw new RangeError('external byte release exceeds reserved bytes');
+    }
+    this.#budget.release(bytes);
+    this.#externalBytes -= bytes;
   }
 
   async append(record, depth = 0) {
@@ -294,7 +312,7 @@ export async function repartition(path, depth, options = {}) {
   } catch (error) {
     const stagingBytes = await directoryBytes(stagingRoot).catch(() => 0);
     await rm(stagingRoot, { recursive: true, force: true });
-    context.budget.release(stagingBytes);
+    if (stagingBytes > 0) context.budget.release(stagingBytes);
     forgetTree(stagingRoot, activeTracker);
     throw error;
   }

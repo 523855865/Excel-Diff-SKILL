@@ -4,10 +4,162 @@ import parseSax from 'exceljs/lib/utils/parse-sax.js';
 import sharedFormulaUtils from 'exceljs/lib/utils/shared-formula.js';
 import excelUtils from 'exceljs/lib/utils/utils.js';
 import relationshipTypes from 'exceljs/lib/xlsx/rel-type.js';
+import { readSync } from 'node:fs';
+import { mkdtemp, open, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import unzipper from 'unzipper';
 
+import { PartitionError } from './partitions.js';
+
 const { slideFormula } = sharedFormulaUtils;
+const sharedStringIndexBytes = 16;
+
+async function writeAll(file, buffer, position) {
+  let written = 0;
+  while (written < buffer.length) {
+    const result = await file.write(buffer, written, buffer.length - written, position + written);
+    if (result.bytesWritten === 0) throw new Error('shared string spool write returned zero bytes');
+    written += result.bytesWritten;
+  }
+}
+
+function readExact(fd, buffer, position) {
+  let read = 0;
+  while (read < buffer.length) {
+    const bytes = readSync(fd, buffer, read, buffer.length - read, position + read);
+    if (bytes === 0) throw new Error('invalid shared string spool');
+    read += bytes;
+  }
+}
+
+async function retryCleanup(action) {
+  let failure;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await action();
+    } catch (error) {
+      failure = error;
+    }
+  }
+  throw failure;
+}
+
+async function createSharedStringTable(options) {
+  const openFile = options.openFile ?? open;
+  const remove = options.remove ?? rm;
+  const directory = await mkdtemp(join(tmpdir(), 'excel-diff-shared-'));
+  let data;
+  let index;
+  try {
+    data = await openFile(join(directory, 'data'), 'w+');
+    index = await openFile(join(directory, 'index'), 'w+');
+  } catch (error) {
+    let cleanupError;
+    for (const handle of [data, index]) {
+      if (!handle) continue;
+      try {
+        await retryCleanup(() => handle.close());
+      } catch (closeError) {
+        cleanupError ??= closeError;
+      }
+    }
+    try {
+      await retryCleanup(() => remove(directory, { recursive: true, force: true }));
+    } catch (removeError) {
+      cleanupError ??= removeError;
+    }
+    if (cleanupError && error && (typeof error === 'object' || typeof error === 'function')) {
+      try { error.cleanupError = cleanupError; } catch {}
+    }
+    throw error;
+  }
+  let count = 0;
+  let offset = 0;
+  let reserved = 0;
+  let dataClosed = false;
+  let indexClosed = false;
+  let removed = false;
+  let released = false;
+  const reserve = options.tempBudget
+    ? (bytes) => options.tempBudget.reserveExternal(bytes)
+    : (bytes) => {
+      if (reserved + bytes > (options.maxTempBytes ?? Infinity)) {
+        throw new PartitionError('TEMP_LIMIT_EXCEEDED', 'temporary data exceeds resources.maxTempBytes');
+      }
+    };
+  const values = new Proxy(Object.create(null), {
+    get(_target, property) {
+      if (property === 'length') return count;
+      if (typeof property !== 'string' || !/^(?:0|[1-9]\d*)$/.test(property)) return undefined;
+      const item = Number(property);
+      if (item >= count) return undefined;
+      const location = Buffer.allocUnsafe(sharedStringIndexBytes);
+      readExact(index.fd, location, item * sharedStringIndexBytes);
+      const start = Number(location.readBigUInt64LE(0));
+      const length = location.readUInt32LE(8);
+      const encoded = Buffer.allocUnsafe(length);
+      readExact(data.fd, encoded, start);
+      return JSON.parse(encoded.toString('utf8'));
+    }
+  });
+  return {
+    directory,
+    values,
+    get bytes() { return reserved; },
+    async append(item) {
+      const encoded = Buffer.from(JSON.stringify(item), 'utf8');
+      const bytes = encoded.length + sharedStringIndexBytes;
+      reserve(bytes);
+      reserved += bytes;
+      const location = Buffer.alloc(sharedStringIndexBytes);
+      location.writeBigUInt64LE(BigInt(offset), 0);
+      location.writeUInt32LE(encoded.length, 8);
+      await writeAll(data, encoded, offset);
+      await writeAll(index, location, count * sharedStringIndexBytes);
+      offset += encoded.length;
+      count += 1;
+    },
+    async close() {
+      let firstError;
+      if (!dataClosed) {
+        try {
+          await data.close();
+          dataClosed = true;
+        } catch (error) {
+          firstError ??= error;
+        }
+      }
+      if (!indexClosed) {
+        try {
+          await index.close();
+          indexClosed = true;
+        } catch (error) {
+          firstError ??= error;
+        }
+      }
+      if (dataClosed && indexClosed && !removed) {
+        try {
+          await remove(directory, { recursive: true, force: true });
+          removed = true;
+        } catch (error) {
+          firstError ??= error;
+        }
+      }
+      if (dataClosed && indexClosed && removed && !released) {
+        try {
+          if (reserved > 0) options.tempBudget?.releaseExternal(reserved);
+          reserved = 0;
+          released = true;
+        } catch (error) {
+          firstError ??= error;
+        }
+      }
+      if (firstError) throw firstError;
+    }
+  };
+}
 
 function xmlAttribute(tag, name) {
   return new RegExp(`(?:^|\\s)${name}=(["'])(.*?)\\1`).exec(tag)?.[2];
@@ -127,7 +279,8 @@ async function* transformWorksheet(iterator, formulaResults) {
   yield* drain(true);
 }
 
-async function readHyperlinks(entries, workbook, sheetName) {
+async function readHyperlinks(entries, workbook, sheetName, check) {
+  check();
   const sheet = workbook.model.sheets.find(({ name }) => name === sheetName);
   const relationship = sheet && workbook.workbookRels.find(({ Id }) => Id === sheet.rId);
   if (!relationship) return new Map();
@@ -139,6 +292,7 @@ async function readHyperlinks(entries, workbook, sheetName) {
 
   const targets = new Map();
   for await (const events of parseSax(entries.get(relationshipPath).stream())) {
+    check();
     for (const { eventType, value } of events) {
       if (eventType === 'opentag' && value.name === 'Relationship'
         && value.attributes.Type === relationshipTypes.Hyperlink) {
@@ -151,6 +305,7 @@ async function readHyperlinks(entries, workbook, sheetName) {
   // ponytail: hyperlink-bearing sheets are decompressed twice because ExcelJS 4.4 emits refs after rows; replace when upstream provides row-time targets.
   const hyperlinks = new Map();
   for await (const events of parseSax(entries.get(sheetPath).stream())) {
+    check();
     for (const { eventType, value } of events) {
       if (eventType !== 'opentag' || value.name !== 'hyperlink') continue;
       const target = targets.get(value.attributes['r:id']);
@@ -160,47 +315,81 @@ async function readHyperlinks(entries, workbook, sheetName) {
   return hyperlinks;
 }
 
-export async function openStreamingWorkbook(filePath, sheetName) {
+export async function openStreamingWorkbook(filePath, sheetName, options = {}) {
+  const check = options.check ?? (() => {});
   const workbook = new ExcelJS.stream.xlsx.WorkbookReader(filePath, {
     worksheets: 'emit',
-    sharedStrings: 'cache',
+    sharedStrings: 'emit',
     hyperlinks: 'ignore',
     styles: 'cache'
   });
-  const archive = await unzipper.Open.file(filePath);
-  const entries = new Map(archive.files.map((entry) => [entry.path, entry]));
-  await workbook._parseRels(entries.get('xl/_rels/workbook.xml.rels').stream());
-  await workbook._parseWorkbook(entries.get('xl/workbook.xml').stream());
-  if (entries.has('xl/sharedStrings.xml')) {
-    for await (const unused of workbook._parseSharedStrings(entries.get('xl/sharedStrings.xml').stream())) void unused;
-  } else workbook.sharedStrings = [];
-  if (entries.has('xl/styles.xml')) await workbook._parseStyles(entries.get('xl/styles.xml').stream());
-
-  const hyperlinks = await readHyperlinks(entries, workbook, sheetName);
-  const formulaResults = new Map();
-  return {
-    workbook,
-    prepareWorksheet(sheet) {
-      sheet.iterator = transformWorksheet(sheet.iterator, formulaResults);
-    },
-    cellValue(cell) {
-      const formula = cell.formula;
-      const hyperlink = hyperlinks.get(cell.address);
-      let value = hyperlink ? { text: cell.text, ...hyperlink }
-        : cell.value?.sharedFormula ? { ...cell.value, formula } : cell.value;
-      const formulaResult = formulaResults.get(cell.row)?.get(cell.address);
-      if (value?.formula && formulaResult?.type === 'b') {
-        value = { ...value, result: formulaResult.value !== '0' };
-      } else if (value?.formula && formulaResult?.type === 'e') {
-        value = { ...value, result: { error: excelUtils.xmlDecode(formulaResult.value) } };
+  let sharedStrings;
+  try {
+    check();
+    const archive = await unzipper.Open.file(filePath);
+    check();
+    const entries = new Map(archive.files.map((entry) => [entry.path, entry]));
+    await workbook._parseRels(entries.get('xl/_rels/workbook.xml.rels').stream());
+    check();
+    await workbook._parseWorkbook(entries.get('xl/workbook.xml').stream());
+    check();
+    if (entries.has('xl/sharedStrings.xml')) {
+      sharedStrings = await createSharedStringTable(options);
+      for await (const { text } of workbook._parseSharedStrings(entries.get('xl/sharedStrings.xml').stream())) {
+        check();
+        await sharedStrings.append(text);
       }
-      if (value?.formula && typeof value.result === 'number' && excelUtils.isDateFmt(cell.numFmt)) {
-        value = { ...value, result: excelUtils.excelToDate(value.result, workbook.properties.model?.date1904) };
-      }
-      return value;
-    },
-    releaseRow(rowNumber) {
-      formulaResults.delete(rowNumber);
+      workbook.sharedStrings = sharedStrings.values;
+    } else workbook.sharedStrings = [];
+    check();
+    if (entries.has('xl/styles.xml')) {
+      await workbook._parseStyles(entries.get('xl/styles.xml').stream());
+      check();
     }
-  };
+
+    const hyperlinks = await readHyperlinks(entries, workbook, sheetName, check);
+    check();
+    const formulaResults = new Map();
+    return {
+      workbook,
+      tempDirectory: sharedStrings?.directory,
+      get tempBytes() { return sharedStrings?.bytes ?? 0; },
+      close: async () => sharedStrings?.close(),
+      prepareWorksheet(sheet) {
+        sheet.iterator = transformWorksheet(sheet.iterator, formulaResults);
+      },
+      cellValue(cell) {
+        const formula = cell.formula;
+        const hyperlink = hyperlinks.get(cell.address);
+        let value = hyperlink ? { text: cell.text, ...hyperlink }
+          : cell.value?.sharedFormula ? { ...cell.value, formula } : cell.value;
+        const formulaResult = formulaResults.get(cell.row)?.get(cell.address);
+        if (value?.formula && formulaResult?.type === 'b') {
+          value = { ...value, result: formulaResult.value !== '0' };
+        } else if (value?.formula && formulaResult?.type === 'e') {
+          value = { ...value, result: { error: excelUtils.xmlDecode(formulaResult.value) } };
+        }
+        if (value?.formula && typeof value.result === 'number' && excelUtils.isDateFmt(cell.numFmt)) {
+          value = { ...value, result: excelUtils.excelToDate(value.result, workbook.properties.model?.date1904) };
+        }
+        return value;
+      },
+      releaseRow(rowNumber) {
+        formulaResults.delete(rowNumber);
+      }
+    };
+  } catch (error) {
+    let cleanupError;
+    if (sharedStrings) {
+      try {
+        await retryCleanup(() => sharedStrings.close());
+      } catch (closeError) {
+        cleanupError = closeError;
+      }
+    }
+    if (cleanupError && error && (typeof error === 'object' || typeof error === 'function')) {
+      try { error.cleanupError = cleanupError; } catch {}
+    }
+    throw error;
+  }
 }

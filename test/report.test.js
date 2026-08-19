@@ -85,7 +85,7 @@ test('createReportWriter atomically publishes streamed key details', async (t) =
   assert.equal(completed.summary.status, 'COMPLETED');
   assert.equal((await stat(completed.directory)).isDirectory(), true);
   assert.equal((await readdir(directory)).some((name) => name.endsWith('.tmp')), false);
-  assert.deepEqual((await readdir(completed.directory)).sort(), ['changed.csv', 'missing.csv', 'summary.json']);
+  assert.deepEqual((await readdir(completed.directory)).sort(), ['changed.csv', 'duplicate-keys.csv', 'missing.csv', 'summary.json']);
   assert.equal(parseCsv(await readFile(join(completed.directory, 'changed.csv'), 'utf8')).length, 2);
   assert.equal(parseCsv(await readFile(join(completed.directory, 'missing.csv'), 'utf8')).length, 2);
 });
@@ -195,7 +195,7 @@ test('createReportWriter aborts failed writes into a redacted summary-only repor
     createStream: () => new Writable({
       write(_chunk, _encoding, callback) {
         writes += 1;
-        callback(writes === 3 ? writeError : null);
+        callback(writes === 4 ? writeError : null);
       }
     })
   });
@@ -216,6 +216,19 @@ test('createReportWriter aborts failed writes into a redacted summary-only repor
   assert.equal(aborted.summary.code, 'WRITE_FAILED');
   assert.doesNotMatch(summaryText, /SECRET-WRITE-VALUE|SECRET-KEY|before|after/);
   assert.equal(summaryText.endsWith('\n'), true);
+});
+
+test('abort normalizes raw disk exhaustion to a DISK_FULL summary', async (t) => {
+  const directory = await makeTempDir();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const writer = await createReportWriter(reportSpec(directory, ['A', 'B']));
+
+  const aborted = await writer.abort(Object.assign(new Error('SECRET-DISK-PATH'), { code: 'ENOSPC' }));
+  const summaryText = await readFile(join(aborted.directory, 'summary.json'), 'utf8');
+
+  assert.equal(aborted.summary.code, 'DISK_FULL');
+  assert.equal(aborted.summary.message, 'comparison failed');
+  assert.doesNotMatch(summaryText, /SECRET-DISK-PATH|ENOSPC/);
 });
 
 test('abort scrubs staged details and surfaces an unwritable-parent failure', { skip: process.platform === 'win32' }, async (t) => {
@@ -309,14 +322,19 @@ test('writeReport writes deterministic CSV artifacts and a protected summary', a
       presentFiles: ['B|east', 'A'],
       missingFiles: ['C|west'],
       baselineRelation: 'ADDED'
+    }],
+    duplicates: [{
+      key: [typed('string', '=duplicate-key')],
+      files: ['B', 'A']
     }]
   });
   const originalResult = structuredClone(result);
 
   const report = await writeReport(reportSpec(directory), result);
-  const [changedCsv, missingCsv, summaryText] = await Promise.all([
+  const [changedCsv, missingCsv, duplicatesCsv, summaryText] = await Promise.all([
     readFile(join(report.directory, 'changed.csv'), 'utf8'),
     readFile(join(report.directory, 'missing.csv'), 'utf8'),
+    readFile(join(report.directory, 'duplicate-keys.csv'), 'utf8'),
     readFile(join(report.directory, 'summary.json'), 'utf8')
   ]);
   const summary = JSON.parse(summaryText);
@@ -331,9 +349,17 @@ test('writeReport writes deterministic CSV artifacts and a protected summary', a
     ['z', 'Data', 'beta', 'a,"b\nc', 'string', '3', JSON.stringify({ formula: '=SUM(A1:A2)', result: 2 }), 'formula', '4', '', 'blank', '5']
   ]);
   assert.equal(missingCsv, 'key,sheet,presentFiles,missingFiles,baselineRelation\nhas|pipe,Data,"[""B|east"",""A""]","[""C|west""]",ADDED\n');
+  assert.deepEqual(parseCsv(duplicatesCsv), [
+    ['key', 'files'],
+    [`json:${JSON.stringify('=duplicate-key')}`, JSON.stringify(['B', 'A'])]
+  ]);
   assert.equal(summary.status, 'COMPLETED');
   assert.equal(summary.runId, report.summary.runId);
-  assert.deepEqual(summary.artifacts, { changed: 'changed.csv', missing: 'missing.csv' });
+  assert.deepEqual(summary.artifacts, {
+    changed: 'changed.csv',
+    missing: 'missing.csv',
+    duplicates: 'duplicate-keys.csv'
+  });
   assert.equal(summary.files, 3);
   assert.equal(summaryText.endsWith('\n'), true);
   assert.deepEqual(result, originalResult);
@@ -478,14 +504,17 @@ test('writeReport creates unique runs and writes header-only CSVs for empty deta
   const directory = await makeTempDir();
   t.after(() => rm(directory, { recursive: true, force: true }));
   const spec = reportSpec(directory);
+  const legacyResult = reportResult();
+  delete legacyResult.duplicates;
 
   const first = await writeReport(spec, reportResult());
-  const second = await writeReport(spec, reportResult());
+  const second = await writeReport(spec, legacyResult);
 
   assert.notEqual(first.summary.runId, second.summary.runId);
   assert.match(second.summary.runId, /^\d{8}T\d{6}Z-[0-9a-f]{8}$/);
   assert.equal(await readFile(join(first.directory, 'changed.csv'), 'utf8'), 'key,sheet,column,B.value,B.type,B.row,A.value,A.type,A.row,C.value,C.type,C.row\n');
   assert.equal(await readFile(join(first.directory, 'missing.csv'), 'utf8'), 'key,sheet,presentFiles,missingFiles,baselineRelation\n');
+  assert.equal(await readFile(join(first.directory, 'duplicate-keys.csv'), 'utf8'), 'key,files\n');
 });
 
 test('writeReport writes protected deterministic multiset output only for multiset mode', async (t) => {
@@ -525,6 +554,7 @@ test('writeReport writes protected deterministic multiset output only for multis
   });
   await assert.rejects(() => readFile(join(report.directory, 'changed.csv'), 'utf8'));
   await assert.rejects(() => readFile(join(report.directory, 'missing.csv'), 'utf8'));
+  await assert.rejects(() => readFile(join(report.directory, 'duplicate-keys.csv'), 'utf8'));
 
   const keyReport = await writeReport(reportSpec(directory), reportResult());
   await assert.rejects(() => readFile(join(keyReport.directory, 'multiset.csv'), 'utf8'));

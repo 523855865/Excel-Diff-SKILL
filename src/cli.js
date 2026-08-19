@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { once } from 'node:events';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import { CompareError, comparePartitioned } from './compare.js';
 import { PartitionError } from './partitions.js';
@@ -35,15 +37,20 @@ function parseArgs(args) {
   return { path, progress, keepTemp };
 }
 
-function failure(error) {
+export function failure(error) {
   const comparisonError = error instanceof InputError || error instanceof CompareError || error instanceof PartitionError;
-  const known = error instanceof UsageError || error instanceof SpecError || comparisonError;
-  const exitCode = comparisonError ? 4 : known ? 2 : 6;
+  const diskFull = error?.code === 'ENOSPC' || error?.code === 'EDQUOT';
+  const known = error instanceof UsageError || error instanceof SpecError || comparisonError || diskFull;
+  const resourceError = diskFull || (comparisonError && typeof error?.code === 'string'
+    && (error.code.endsWith('_LIMIT_EXCEEDED') || error.code === 'HOT_KEY_TOO_LARGE'));
+  const exitCode = resourceError ? 5 : comparisonError ? 4 : known ? 2 : 6;
   const output = {
     status: 'FAILED',
-    code: known ? error.code : 'INTERNAL_ERROR',
-    message: known ? error.message : 'unexpected error'
+    code: diskFull ? 'DISK_FULL' : known ? error.code : 'INTERNAL_ERROR',
+    message: diskFull ? 'output storage is full' : known ? error.message : 'unexpected error'
   };
+  const tempDirectory = error?.tempDirectory ?? error?.cause?.tempDirectory;
+  if (typeof tempDirectory === 'string') output.tempDirectory = tempDirectory;
   if (process.env.EXCEL_DIFF_DEBUG === '1' && error.stack) output.stack = error.stack;
   return { exitCode, output };
 }
@@ -52,12 +59,13 @@ async function writeJsonLine(stream, value) {
   if (!stream.write(`${JSON.stringify(value)}\n`)) await once(stream, 'drain');
 }
 
-async function main(args) {
+export async function main(args, dependencies = {}) {
   const options = parseArgs(args);
   const spec = await loadSpec(options.path);
-  const report = await createReportWriter(spec);
+  const report = await (dependencies.createReportWriter ?? createReportWriter)(spec);
   let latestProgress;
   let lastProgressRows = 0;
+  let result;
   const emitProgress = async (progress) => writeJsonLine(process.stderr, {
     bytesWritten: progress.bytesWritten,
     currentFile: progress.currentFile,
@@ -65,7 +73,7 @@ async function main(args) {
     type: 'PROGRESS'
   });
   try {
-    const result = await comparePartitioned(spec, report, {
+    result = await comparePartitioned(spec, report, {
       keepTemp: options.keepTemp,
       onProgress: options.progress ? async (progress) => {
         latestProgress = progress;
@@ -87,13 +95,25 @@ async function main(args) {
       ...(result.tempDirectory ? { tempDirectory: result.tempDirectory } : {})
     });
   } catch (error) {
+    if (result?.tempDirectory && error && (typeof error === 'object' || typeof error === 'function')
+      && error.tempDirectory == null) {
+      try { error.tempDirectory = result.tempDirectory; } catch {}
+    }
     await report.abort(error);
     throw error;
   }
 }
 
-main(process.argv.slice(2)).catch((error) => {
-  const { exitCode, output } = failure(error);
-  process.stderr.write(`${JSON.stringify(output)}\n`);
-  process.exitCode = exitCode;
-});
+let invokedDirectly = false;
+try {
+  invokedDirectly = Boolean(process.argv[1]) && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error;
+}
+if (invokedDirectly) {
+  main(process.argv.slice(2)).catch((error) => {
+    const { exitCode, output } = failure(error);
+    process.stderr.write(`${JSON.stringify(output)}\n`);
+    process.exitCode = exitCode;
+  });
+}

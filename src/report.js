@@ -53,9 +53,12 @@ export async function createReportWriter(spec, options = {}) {
     multiset: ['values', 'sheet', ...fileIds.map((fileId) => safeText(`${fileId}.count`)), 'baselineRelation']
   } : {
     changed: ['key', 'sheet', 'column', ...fileIds.flatMap((fileId) => [safeText(`${fileId}.value`), safeText(`${fileId}.type`), safeText(`${fileId}.row`)])],
-    missing: ['key', 'sheet', 'presentFiles', 'missingFiles', 'baselineRelation']
+    missing: ['key', 'sheet', 'presentFiles', 'missingFiles', 'baselineRelation'],
+    duplicates: ['key', 'files']
   };
-  const artifacts = Object.fromEntries(Object.keys(definitions).map((name) => [name, `${name}.csv`]));
+  const artifacts = Object.fromEntries(Object.keys(definitions).map((name) => [
+    name, name === 'duplicates' ? 'duplicate-keys.csv' : `${name}.csv`
+  ]));
   const streams = new Map();
   const createStream = options.createStream ?? ((path) => createWriteStream(path, { encoding: 'utf8' }));
   let firstStreamError;
@@ -130,7 +133,7 @@ export async function createReportWriter(spec, options = {}) {
   await mkdir(staging);
   pending = (async () => {
     for (const [name, header] of Object.entries(definitions)) {
-      const stream = createStream(join(staging, `${name}.csv`), { encoding: 'utf8' });
+      const stream = createStream(join(staging, artifacts[name]), { encoding: 'utf8' });
       stream.on('error', (error) => { firstStreamError ??= error; });
       streams.set(name, stream);
       await writeChunk(stream, csv([header]));
@@ -149,7 +152,7 @@ export async function createReportWriter(spec, options = {}) {
     onMissing: (entry) => enqueue('missing', [
       displayKey(entry.key), safeText(entry.sheetName), JSON.stringify(entry.presentFiles), JSON.stringify(entry.missingFiles), entry.baselineRelation
     ]),
-    onDuplicate: async () => {},
+    onDuplicate: (entry) => enqueue('duplicates', [displayKey(entry.key), JSON.stringify(entry.files)]),
     onMultiset: (entry) => enqueue('multiset', [
       safeValue(entry.values.map(untypedValue)), safeText(entry.sheetName),
       ...fileIds.map((fileId) => entry.counts[fileId]), entry.baselineRelation
@@ -173,10 +176,14 @@ export async function createReportWriter(spec, options = {}) {
         if (scrubError) throw scrubError;
         await rm(staging, { recursive: true, force: true });
         await mkdir(staging);
-        const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]*$/.test(error.code)
+        const diskFull = error?.code === 'ENOSPC' || error?.code === 'EDQUOT';
+        const code = diskFull ? 'DISK_FULL' : typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]*$/.test(error.code)
           ? error.code
           : 'INTERNAL_ERROR';
-        const aborted = await publish({ status: 'FAILED', code, message: 'comparison failed' });
+        const aborted = await publish({
+          status: 'FAILED', code, message: 'comparison failed',
+          ...(typeof error?.tempDirectory === 'string' ? { tempDirectory: error.tempDirectory } : {})
+        });
         state = 'aborted';
         return aborted;
       } catch (abortError) {
@@ -207,6 +214,7 @@ export async function writeReport(spec, result) {
     });
     for (const entry of changed) await writer.onChanged(entry);
     for (const entry of result.missing) await writer.onMissing(entry);
+    for (const entry of result.duplicates ?? []) await writer.onDuplicate(entry);
     for (const entry of multiset) await writer.onMultiset(entry);
     return await writer.complete(result.summary);
   } catch (error) {

@@ -1,5 +1,6 @@
 import { openStreamingWorkbook } from './exceljs-stream-compat.js';
 import { matchesFilter, normalizeValue } from './normalize.js';
+import { PartitionError } from './partitions.js';
 
 export class InputError extends Error {
   constructor(code, message) {
@@ -171,7 +172,7 @@ function resolveColumns(row, file, spec, standardColumns) {
   return { columns, mapping };
 }
 
-export async function scanFileRows(file, spec, standardColumns = null, onRow = async () => {}, onScan = async () => {}) {
+export async function scanFileRows(file, spec, standardColumns = null, onRow = async () => {}, onScan = async () => {}, options = {}) {
   const availableSheets = [];
   let columns;
   let mapping;
@@ -261,12 +262,44 @@ export async function scanFileRows(file, spec, standardColumns = null, onRow = a
     }
   };
 
+  let failure;
   try {
-    compatibility = await openStreamingWorkbook(file.path, spec.sheet.name);
+    compatibility = await openStreamingWorkbook(file.path, spec.sheet.name, {
+      maxTempBytes: spec.resources?.maxTempBytes,
+      tempBudget: options.tempBudget,
+      check: options.check,
+      openFile: options.openFile,
+      remove: options.remove
+    });
     await consume(compatibility.workbook);
   } catch (error) {
-    if (error instanceof InputError || error === callbackFailure) throw error;
-    throw new InputError('INPUT_ERROR', `cannot read XLSX input for ${file.id}`);
+    if (error instanceof InputError || error instanceof PartitionError || error === callbackFailure
+      || error?.code === 'RUNTIME_LIMIT_EXCEEDED' || error?.code === 'ENOSPC' || error?.code === 'EDQUOT') {
+      failure = error;
+    } else {
+      failure = new InputError('INPUT_ERROR', `cannot read XLSX input for ${file.id}`);
+      if (error?.cleanupError) failure.cleanupError = error.cleanupError;
+    }
+    throw failure;
+  } finally {
+    if (compatibility) {
+      let cleanupError;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          await compatibility.close();
+          cleanupError = undefined;
+          break;
+        } catch (error) {
+          cleanupError = error;
+        }
+      }
+      if (cleanupError) {
+        if (!failure) throw cleanupError;
+        if (failure && (typeof failure === 'object' || typeof failure === 'function')) {
+          try { failure.cleanupError = cleanupError; } catch {}
+        }
+      }
+    }
   }
 
   if (!foundSheet) {

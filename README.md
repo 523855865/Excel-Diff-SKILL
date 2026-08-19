@@ -51,15 +51,15 @@ node src/cli.js compare --spec /absolute/path/to/compare.json [--progress] [--ke
 
 ## 输出与进度
 
-成功时标准输出仅有一行 JSON，包含汇总字段和本次绝对输出目录 `directory`。比较过程逐行读取 XLSX，将紧凑记录写入临时磁盘分区，内存中只加载当前有界分区。报告先写入输出目录下的隐藏 `.tmp` staging 目录，完成后才原子重命名为最终目录。`output.directory` 必须是单写者目录；Node.js 标准库不提供 POSIX 目录 `rename-noreplace`，因此外部进程若在最终冲突检查与 `rename` 之间抢占同一个随机 run ID，不在保证范围内。最终目录包含：
+成功时标准输出仅有一行 JSON，包含汇总字段和本次绝对输出目录 `directory`。比较过程逐行读取 XLSX，将共享字符串和紧凑比较记录写入临时磁盘；内存中只加载当前有界分区以及具有 Excel 固定上限的元数据（样式约 65k、每个工作表的超链接约 65k）。共享字符串 spool 和比较分区共同计入 `maxTempBytes`。报告先写入输出目录下的隐藏 `.tmp` staging 目录，完成后才原子重命名为最终目录。`output.directory` 必须是单写者目录；Node.js 标准库不提供 POSIX 目录 `rename-noreplace`，因此外部进程若在最终冲突检查与 `rename` 之间抢占同一个随机 run ID，不在保证范围内。最终目录包含：
 
 - `summary.json`：本次汇总；
-- `key`/`row` 模式的 `changed.csv` 和 `missing.csv`：字段差异以及新增、删除记录；
+- `key`/`row` 模式的 `changed.csv`、`missing.csv` 和 `duplicate-keys.csv`：字段差异、新增/删除记录以及重复键所在文件；
 - `multiset` 模式的 `multiset.csv`：值组合、sheet、按 CompareSpec 文件顺序排列的 `<fileId>.count` 和 `baselineRelation`。
 
 为防止 CSV 公式注入，危险的标签、key 和值会编码为 `json:<JSON string>`。
 
-`--progress` 在标准错误输出 NDJSON 进度，最多每 1,000 个扫描行一次并包含最终进度；事件只有 `bytesWritten`、`currentFile`、`rowsScanned`、`type` 四个非敏感字段。`--keep-temp` 在成功 stdout JSON 中增加绝对 `tempDirectory` 并保留临时分区；使用者负责清理。
+`--progress` 在标准错误输出 NDJSON 进度，最多每 1,000 个扫描行一次并包含最终进度；事件只有 `bytesWritten`、`currentFile`、`rowsScanned`、`type` 四个非敏感字段。`--keep-temp` 在成功 stdout JSON 中增加绝对 `tempDirectory` 并保留临时分区；失败时 stderr JSON 和失败 `summary.json` 也会返回该路径。使用者在成功或失败后都负责清理。
 
 ## 验证与错误
 
@@ -72,6 +72,7 @@ npm test
 | 0 | 比较完成 |
 | 2 | 命令用法或 CompareSpec 无效 |
 | 4 | 输入文件或比较错误 |
+| 5 | 资源限制超出，或磁盘空间/配额耗尽（`DISK_FULL`） |
 | 6 | 未预期内部错误 |
 
 只要输出文件系统仍可写，失败时未发布的 CSV staging 会被删除，并原子发布一个仅含脱敏 `summary.json` 的失败目录。若输出目录一开始就无法创建，物理上无法写入失败报告；若文件系统在清理或发布中变为不可写，程序会尽力清除明细，可能只留下空 staging 目录，并以脱敏 `INTERNAL_ERROR` 报告。未启用 progress 时，标准错误仅有一行 JSON：`{"status":"FAILED","code":"...","message":"..."}`。默认不输出堆栈；设置 `EXCEL_DIFF_DEBUG=1` 时会在该 stderr JSON 中附加 `stack`。

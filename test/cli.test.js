@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
-import { access, chmod, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import test from 'node:test';
 
 import { makeTempDir, writeWorkbook } from './helpers.js';
+import { failure as classifyFailure, main as runMain } from '../src/cli.js';
+import { createReportWriter } from '../src/report.js';
 
 const cli = fileURLToPath(new URL('../src/cli.js', import.meta.url));
 
@@ -72,6 +74,33 @@ function failure(result, code) {
   return value;
 }
 
+test('classifies raw disk exhaustion errors as redacted exit 5 failures', () => {
+  for (const code of ['ENOSPC', 'EDQUOT']) {
+    const error = Object.assign(new Error(`SECRET-${code}`), { code });
+    assert.deepEqual(classifyFailure(error), {
+      exitCode: 5,
+      output: { status: 'FAILED', code: 'DISK_FULL', message: 'output storage is full' }
+    });
+  }
+});
+
+test('imports without an argv file and still executes through a bin symlink', async (t) => {
+  const imported = spawnSync(process.execPath, ['--input-type=module', '-'], {
+    encoding: 'utf8',
+    input: `await import(${JSON.stringify(pathToFileURL(cli).href)});\n`
+  });
+  assert.equal(imported.status, 0);
+  assert.equal(imported.stderr, '');
+
+  const directory = await fixtures(t);
+  const spec = await writeSpec(directory);
+  const link = join(directory, 'excel-diff-bin.js');
+  await symlink(cli, link);
+  const linked = spawnSync(process.execPath, [link, 'compare', '--spec', spec], { encoding: 'utf8' });
+  assert.equal(linked.status, 0);
+  response(linked);
+});
+
 test('compare emits one completed JSON summary and report artifacts', async (t) => {
   const directory = await fixtures(t);
   const spec = await writeSpec(directory);
@@ -95,10 +124,10 @@ test('compare emits one completed JSON summary and report artifacts', async (t) 
       invalidRows: 0,
       status: 'COMPLETED',
       runId: output.runId,
-      artifacts: { changed: 'changed.csv', missing: 'missing.csv' }
+      artifacts: { changed: 'changed.csv', missing: 'missing.csv', duplicates: 'duplicate-keys.csv' }
     }
   );
-  await Promise.all(['summary.json', 'changed.csv', 'missing.csv'].map((file) => access(join(output.directory, file), constants.F_OK)));
+  await Promise.all(['summary.json', 'changed.csv', 'missing.csv', 'duplicate-keys.csv'].map((file) => access(join(output.directory, file), constants.F_OK)));
   assert.equal((await stat(output.directory)).isDirectory(), true);
   assert.deepEqual(
     Object.fromEntries(Object.keys(output).filter((key) => key !== 'directory').map((key) => [key, output[key]])),
@@ -153,18 +182,65 @@ test('comparison failures publish only a FAILED summary after spec loading', asy
   assert.equal(Object.hasOwn(summary, 'artifacts'), false);
 });
 
+test('--keep-temp exposes the retained partition directory on comparison failure', async (t) => {
+  const directory = await makeTempDir();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const spec = await writeSpec(directory);
+
+  const result = run(['compare', '--keep-temp', '--spec', spec]);
+
+  assert.equal(result.status, 4);
+  assert.equal(result.stdout, '');
+  const output = jsonLine(result.stderr);
+  assert.deepEqual(Object.keys(output).sort(), ['code', 'message', 'status', 'tempDirectory']);
+  assert.equal(output.code, 'INPUT_ERROR');
+  assert.equal(isAbsolute(output.tempDirectory), true);
+  await access(output.tempDirectory);
+  t.after(() => rm(output.tempDirectory, { recursive: true, force: true }));
+  const runs = await readdir(join(directory, 'output'));
+  const summary = JSON.parse(await readFile(join(directory, 'output', runs[0], 'summary.json'), 'utf8'));
+  assert.equal(summary.tempDirectory, output.tempDirectory);
+});
+
+test('--keep-temp survives a report complete failure in stderr and FAILED summary', async (t) => {
+  const directory = await fixtures(t);
+  const specPath = await writeSpec(directory);
+  const completeError = Object.assign(new Error('SECRET-COMPLETE-FAILURE'), { code: 'EIO' });
+
+  await assert.rejects(
+    () => runMain(['compare', '--keep-temp', '--spec', specPath], {
+      async createReportWriter(spec) {
+        const writer = await createReportWriter(spec);
+        return { ...writer, complete: async () => { throw completeError; } };
+      }
+    }),
+    (error) => error === completeError
+  );
+  assert.equal(isAbsolute(completeError.tempDirectory), true);
+  await access(completeError.tempDirectory);
+  t.after(() => rm(completeError.tempDirectory, { recursive: true, force: true }));
+  const runs = await readdir(join(directory, 'output'));
+  const summary = JSON.parse(await readFile(join(directory, 'output', runs[0], 'summary.json'), 'utf8'));
+  assert.equal(summary.status, 'FAILED');
+  assert.equal(summary.tempDirectory, completeError.tempDirectory);
+  assert.deepEqual(classifyFailure(completeError).output, {
+    status: 'FAILED', code: 'INTERNAL_ERROR', message: 'unexpected error',
+    tempDirectory: completeError.tempDirectory
+  });
+});
+
 test('CLI surfaces an abort publication failure as a redacted internal error', { skip: process.platform === 'win32' }, async (t) => {
   const rows = [
     ['编号', '姓名'],
-    ...Array.from({ length: 1001 }, () => ['SECRET-CLI-KEY', 'SECRET-CLI-VALUE'])
+    ...Array.from({ length: 1001 }, (_, index) => [`SECRET-CLI-KEY-${index}`, `SECRET-CLI-VALUE-${index}`])
   ];
   const directory = await fixtures(t, rows);
-  const spec = await writeSpec(directory, { duplicateKeyPolicy: 'fail' });
+  const spec = await writeSpec(directory);
   const outputDirectory = join(directory, 'output');
   t.after(() => chmod(outputDirectory, 0o755).catch(() => {}));
 
   const result = await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [cli, 'compare', '--progress', '--spec', spec], {
+    const child = spawn(process.execPath, [cli, 'compare', '--keep-temp', '--progress', '--spec', spec], {
       env: process.env
     });
     let stdout = '';
@@ -195,6 +271,9 @@ test('CLI surfaces an abort publication failure as a redacted internal error', {
   const lines = result.stderr.trim().split('\n').map((line) => JSON.parse(line));
   assert.equal(lines.at(-1).status, 'FAILED');
   assert.equal(lines.at(-1).code, 'INTERNAL_ERROR');
+  assert.equal(isAbsolute(lines.at(-1).tempDirectory), true);
+  await access(lines.at(-1).tempDirectory);
+  t.after(() => rm(lines.at(-1).tempDirectory, { recursive: true, force: true }));
   assert.doesNotMatch(result.stderr, /SECRET-CLI-KEY|SECRET-CLI-VALUE/);
   const staged = (await readdir(outputDirectory)).filter((name) => name.endsWith('.tmp'));
   for (const name of staged) assert.deepEqual(await readdir(join(outputDirectory, name)), []);
@@ -250,16 +329,38 @@ test('returns a redacted duplicate-key failure', async (t) => {
   assert.doesNotMatch(result.stderr, /SECRET-EMP-001/);
 });
 
-test('returns stable partition resource errors instead of INTERNAL_ERROR', async (t) => {
+test('duplicate report policy publishes a protected duplicate-key locator', async (t) => {
+  const directory = await fixtures(t, [
+    ['编号', '姓名'],
+    ['=DUPLICATE-KEY', 'Ada'],
+    ['=DUPLICATE-KEY', 'Ada again']
+  ]);
+  const spec = await writeSpec(directory);
+
+  const result = run(['compare', '--spec', spec]);
+
+  assert.equal(result.status, 0);
+  const output = response(result);
+  assert.equal(output.artifacts.duplicates, 'duplicate-keys.csv');
+  const duplicateCsv = await readFile(join(output.directory, 'duplicate-keys.csv'), 'utf8');
+  assert.match(duplicateCsv, /^key,files\n/);
+  assert.match(duplicateCsv, /DUPLICATE-KEY/);
+  assert.doesNotMatch(duplicateCsv, /Ada/);
+  assert.doesNotMatch(duplicateCsv.split('\n')[1], /^[=+\-@]/);
+  assert.doesNotMatch(result.stdout + result.stderr, /=DUPLICATE-KEY/);
+});
+
+test('returns exit 5 for stable resource errors instead of INTERNAL_ERROR', async (t) => {
   const directory = await fixtures(t);
   for (const [code, resources] of [
+    ['ROW_LIMIT_EXCEEDED', { maxRows: 1 }],
     ['TEMP_LIMIT_EXCEEDED', { maxTempBytes: 1 }],
     ['HOT_KEY_TOO_LARGE', { maxPartitionBytes: 1 }]
   ]) {
     const spec = await writeSpec(directory, { resources });
     const result = run(['compare', '--spec', spec]);
 
-    assert.equal(result.status, 4);
+    assert.equal(result.status, 5);
     const output = failure(result, code);
     assert.notEqual(output.code, 'INTERNAL_ERROR');
   }

@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import ExcelJS from 'exceljs';
-import { rm, writeFile } from 'node:fs/promises';
+import { access, chmod, open, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import test from 'node:test';
 import unzipper from 'unzipper';
 
 import { makeTempDir, writeWorkbook } from './helpers.js';
+import { openStreamingWorkbook } from '../src/exceljs-stream-compat.js';
 import { InputError, readFileRows, scanFileRows } from '../src/read-xlsx.js';
 
 const require = createRequire(import.meta.url);
@@ -47,6 +48,308 @@ async function rejects(t, file, rules, expected, columns = null) {
 test('loads the ExcelJS 4.4 streaming compatibility boundary', async () => {
   const compatibility = await import('../src/exceljs-stream-compat.js');
   assert.equal(typeof compatibility.openStreamingWorkbook, 'function');
+});
+
+test('spools real shared strings behind a synchronous indexed object and cleans it up', async (t) => {
+  const rows = [
+    ['编号', '姓名'],
+    ...Array.from({ length: 200 }, (_, index) => [`id-${index}`, `unique-${index}`])
+  ];
+  const file = await fixture(t, rows);
+  const compatibility = await openStreamingWorkbook(file.path, '人员');
+  t.after(() => compatibility.close?.());
+
+  assert.equal(Array.isArray(compatibility.workbook.sharedStrings), false);
+  assert.equal(compatibility.workbook.sharedStrings[0], '编号');
+  assert.equal(compatibility.workbook.sharedStrings[compatibility.workbook.sharedStrings.length - 1], 'unique-199');
+  assert.equal(compatibility.tempBytes > 0, true);
+  await access(compatibility.tempDirectory);
+
+  await compatibility.close();
+  await assert.rejects(() => access(compatibility.tempDirectory), (error) => error.code === 'ENOENT');
+  await assert.rejects(
+    () => readFileRows(file, spec({ resources: { maxTempBytes: 1 } })),
+    (error) => error.code === 'TEMP_LIMIT_EXCEEDED'
+  );
+  const result = await readFileRows(file, spec());
+  assert.equal(result.rows.at(-1).values['姓名'][1], 'unique-199');
+});
+
+test('checks runtime while preprocessing real shared strings and preserves the error', async (t) => {
+  const file = await fixture(t, [
+    ['编号', '姓名'],
+    ...Array.from({ length: 5_000 }, (_, index) => [`id-${index}`, `unique-${index}`])
+  ]);
+  const runtimeError = Object.assign(new Error('runtime expired'), { code: 'RUNTIME_LIMIT_EXCEEDED' });
+  let checks = 0;
+  let reservedItems = 0;
+
+  await assert.rejects(
+    () => scanFileRows(file, spec(), null, async () => {}, async () => {}, {
+      check() {
+        checks += 1;
+        if (checks === 40) throw runtimeError;
+      },
+      tempBudget: {
+        reserveExternal() { reservedItems += 1; },
+        releaseExternal() {}
+      }
+    }),
+    (error) => error === runtimeError
+  );
+  assert.equal(checks, 40);
+  assert.equal(reservedItems > 0 && reservedItems < 5_000, true);
+});
+
+test('retries a failed preprocessing cleanup without replacing the deadline error', async (t) => {
+  const file = await fixture(t, [['编号', '姓名'], ['1', 'unique-one'], ['2', 'unique-two']]);
+  const deadlineError = Object.assign(new Error('deadline'), { code: 'RUNTIME_LIMIT_EXCEEDED' });
+  const cleanupError = Object.assign(new Error('cleanup'), { code: 'EACCES' });
+  let checks = 0;
+  let liveBytes = 0;
+  let removeCalls = 0;
+  let spoolDirectory;
+
+  await assert.rejects(
+    () => scanFileRows(file, spec(), null, async () => {}, async () => {}, {
+      check() {
+        checks += 1;
+        if (checks === 10) throw deadlineError;
+      },
+      async openFile(path, flags) {
+        spoolDirectory = dirname(path);
+        return open(path, flags);
+      },
+      async remove(path, options) {
+        removeCalls += 1;
+        if (removeCalls === 1) throw cleanupError;
+        return rm(path, options);
+      },
+      tempBudget: {
+        reserveExternal(bytes) { liveBytes += bytes; },
+        releaseExternal(bytes) { liveBytes -= bytes; }
+      }
+    }),
+    (error) => error === deadlineError
+  );
+  t.after(() => rm(spoolDirectory, { recursive: true, force: true }));
+  assert.equal(removeCalls, 2);
+  assert.equal(liveBytes, 0);
+  await assert.rejects(() => access(spoolDirectory), (error) => error.code === 'ENOENT');
+});
+
+test('retries a failed scan cleanup without replacing the row callback error', async (t) => {
+  const file = await fixture(t, [['编号', '姓名'], ['1', 'unique']]);
+  const callbackError = new Error('callback failed');
+  const cleanupError = Object.assign(new Error('cleanup'), { code: 'EACCES' });
+  let liveBytes = 0;
+  let removeCalls = 0;
+  let spoolDirectory;
+
+  await assert.rejects(
+    () => scanFileRows(file, spec(), null, async () => { throw callbackError; }, async () => {}, {
+      async openFile(path, flags) {
+        spoolDirectory = dirname(path);
+        return open(path, flags);
+      },
+      async remove(path, options) {
+        removeCalls += 1;
+        if (removeCalls === 1) throw cleanupError;
+        return rm(path, options);
+      },
+      tempBudget: {
+        reserveExternal(bytes) { liveBytes += bytes; },
+        releaseExternal(bytes) { liveBytes -= bytes; }
+      }
+    }),
+    (error) => error === callbackError
+  );
+  t.after(() => rm(spoolDirectory, { recursive: true, force: true }));
+  assert.equal(removeCalls, 2);
+  assert.equal(liveBytes, 0);
+  await assert.rejects(() => access(spoolDirectory), (error) => error.code === 'ENOENT');
+});
+
+test('retains a persistent cleanup failure on the original preprocessing error', async (t) => {
+  const file = await fixture(t, [['编号', '姓名'], ['1', 'unique']]);
+  const deadlineError = Object.assign(new Error('deadline'), { code: 'RUNTIME_LIMIT_EXCEEDED' });
+  const cleanupError = Object.assign(new Error('cleanup'), { code: 'EACCES' });
+  let checks = 0;
+  let removeCalls = 0;
+  let spoolDirectory;
+
+  await assert.rejects(
+    () => scanFileRows(file, spec(), null, async () => {}, async () => {}, {
+      check() {
+        checks += 1;
+        if (checks === 10) throw deadlineError;
+      },
+      async openFile(path, flags) {
+        spoolDirectory = dirname(path);
+        return open(path, flags);
+      },
+      async remove() {
+        removeCalls += 1;
+        throw cleanupError;
+      }
+    }),
+    (error) => error === deadlineError && error.cleanupError === cleanupError
+  );
+  assert.equal(removeCalls, 2);
+  t.after(() => rm(spoolDirectory, { recursive: true, force: true }));
+});
+
+test('shared-string close retries removal before releasing its external budget', { skip: process.platform === 'win32' }, async (t) => {
+  const file = await fixture(t, [['编号', '姓名'], ['1', 'unique']]);
+  let liveBytes = 0;
+  const compatibility = await openStreamingWorkbook(file.path, '人员', {
+    tempBudget: {
+      reserveExternal(bytes) { liveBytes += bytes; },
+      releaseExternal(bytes) { liveBytes -= bytes; }
+    }
+  });
+  const reserved = liveBytes;
+  t.after(async () => {
+    await chmod(compatibility.tempDirectory, 0o755).catch(() => {});
+    await compatibility.close().catch(() => {});
+  });
+  await chmod(compatibility.tempDirectory, 0o555);
+
+  await assert.rejects(() => compatibility.close(), (error) => error.code === 'EACCES');
+  assert.equal(liveBytes, reserved);
+  await access(compatibility.tempDirectory);
+
+  await chmod(compatibility.tempDirectory, 0o755);
+  await compatibility.close();
+  assert.equal(liveBytes, 0);
+  await assert.rejects(() => access(compatibility.tempDirectory), (error) => error.code === 'ENOENT');
+});
+
+test('passes through shared-string disk exhaustion and cleans the spool', async (t) => {
+  const file = await fixture(t, [['编号', '姓名'], ['1', 'unique']]);
+  for (const code of ['ENOSPC', 'EDQUOT']) {
+    const diskError = Object.assign(new Error(`SECRET-${code}`), { code });
+    let spoolDirectory;
+    const openFile = async (path, flags) => {
+      spoolDirectory = dirname(path);
+      const handle = await open(path, flags);
+      if (basename(path) === 'data') handle.write = async () => { throw diskError; };
+      return handle;
+    };
+
+    await assert.rejects(
+      () => scanFileRows(file, spec(), null, async () => {}, async () => {}, { openFile }),
+      (error) => error === diskError
+    );
+    await assert.rejects(() => access(spoolDirectory), (error) => error.code === 'ENOENT');
+  }
+});
+
+test('rejects zero-byte spool writes and preserves an open failure over cleanup errors', async (t) => {
+  const file = await fixture(t, [['编号'], ['1']]);
+  const zeroOpen = async (path, flags) => {
+    const handle = await open(path, flags);
+    if (basename(path) === 'data') handle.write = async () => ({ bytesWritten: 0 });
+    return handle;
+  };
+  await assert.rejects(
+    () => openStreamingWorkbook(file.path, '人员', { openFile: zeroOpen }),
+    /zero bytes/
+  );
+
+  const openError = Object.assign(new Error('original open failure'), { code: 'EMFILE' });
+  const cleanupError = new Error('cleanup failure');
+  let calls = 0;
+  let removeCalls = 0;
+  let spoolDirectory;
+  await assert.rejects(
+    () => openStreamingWorkbook(file.path, '人员', {
+      async openFile(path, flags) {
+        spoolDirectory = dirname(path);
+        calls += 1;
+        if (calls === 2) throw openError;
+        return open(path, flags);
+      },
+      async remove() {
+        removeCalls += 1;
+        throw cleanupError;
+      }
+    }),
+    (error) => error === openError && error.cleanupError === cleanupError
+  );
+  assert.equal(removeCalls, 2);
+  t.after(() => rm(spoolDirectory, { recursive: true, force: true }));
+});
+
+test('retries transient handle close and directory removal after the second spool open fails', async (t) => {
+  const file = await fixture(t, [['编号'], ['1']]);
+  const openError = Object.assign(new Error('second open failed'), { code: 'EMFILE' });
+  const closeError = Object.assign(new Error('close failed'), { code: 'EIO' });
+  const removeError = Object.assign(new Error('remove failed'), { code: 'EACCES' });
+  let openCalls = 0;
+  let closeCalls = 0;
+  let removeCalls = 0;
+  let spoolDirectory;
+
+  await assert.rejects(
+    () => openStreamingWorkbook(file.path, '人员', {
+      async openFile(path, flags) {
+        spoolDirectory = dirname(path);
+        openCalls += 1;
+        if (openCalls === 2) throw openError;
+        const handle = await open(path, flags);
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          closeCalls += 1;
+          if (closeCalls === 1) throw closeError;
+          return close();
+        };
+        return handle;
+      },
+      async remove(path, options) {
+        removeCalls += 1;
+        if (removeCalls === 1) throw removeError;
+        return rm(path, options);
+      }
+    }),
+    (error) => error === openError
+  );
+  t.after(() => rm(spoolDirectory, { recursive: true, force: true }));
+  assert.equal(closeCalls, 2);
+  assert.equal(removeCalls, 2);
+  await assert.rejects(() => access(spoolDirectory), (error) => error.code === 'ENOENT');
+});
+
+test('preserves persistent preprocessing cleanup failure on a generic InputError wrapper', async (t) => {
+  const file = await fixture(t, [['编号', '姓名'], ['1', 'unique']]);
+  const preprocessingError = new Error('SECRET-PREPROCESSING');
+  const cleanupError = Object.assign(new Error('SECRET-CLEANUP'), { code: 'EACCES' });
+  let checks = 0;
+  let removeCalls = 0;
+  let spoolDirectory;
+
+  await assert.rejects(
+    () => scanFileRows(file, spec(), null, async () => {}, async () => {}, {
+      check() {
+        checks += 1;
+        if (checks === 10) throw preprocessingError;
+      },
+      async openFile(path, flags) {
+        spoolDirectory = dirname(path);
+        return open(path, flags);
+      },
+      async remove() {
+        removeCalls += 1;
+        throw cleanupError;
+      }
+    }),
+    (error) => error instanceof InputError
+      && error.code === 'INPUT_ERROR'
+      && error.cleanupError === cleanupError
+      && !/SECRET/.test(error.message)
+  );
+  assert.equal(removeCalls, 2);
+  t.after(() => rm(spoolDirectory, { recursive: true, force: true }));
 });
 
 test('reads typed values with Excel provenance and physical row counts', async (t) => {
