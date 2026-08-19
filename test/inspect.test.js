@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import ExcelJS from 'exceljs';
-import { realpath, rm, writeFile } from 'node:fs/promises';
+import { copyFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 
@@ -21,6 +21,12 @@ function risk(file, code) {
   return file.risks.find((item) => item.code === code);
 }
 
+async function filePair(path) {
+  const copy = `${path}.copy.xlsx`;
+  await copyFile(path, copy);
+  return [path, copy];
+}
+
 test('inspects sheet metadata, headers, sampled columns, keys, formulas, and merges without exposing values', async (t) => {
   const path = await workbookFixture(t, 'inspect.xlsx', async (workbook) => {
     const target = workbook.addWorksheet('人员');
@@ -32,7 +38,7 @@ test('inspects sheet metadata, headers, sampled columns, keys, formulas, and mer
     workbook.addWorksheet('系统', { state: 'veryHidden' });
   });
 
-  const result = await inspectFiles([path], { sheet: '人员' });
+  const result = await inspectFiles(await filePair(path), { sheet: '人员' });
   const file = result.files[0];
 
   assert.deepEqual({ status: result.status, sampleRows: result.sampleRows, fullTypes: result.fullTypes }, {
@@ -73,8 +79,9 @@ test('bounds sampled types and candidate memory while fullTypes scans every data
     ]);
   });
 
-  const sampled = await inspectFiles([path], { sheet: '数据', sampleRows: 2 });
-  const full = await inspectFiles([path], { sheet: '数据', sampleRows: 2, fullTypes: true });
+  const paths = await filePair(path);
+  const sampled = await inspectFiles(paths, { sheet: '数据', sampleRows: 2 });
+  const full = await inspectFiles(paths, { sheet: '数据', sampleRows: 2, fullTypes: true });
 
   assert.deepEqual(sampled.files[0].headers[1], {
     index: 2,
@@ -109,7 +116,7 @@ test('records NFKC duplicate headers as risks and excludes them from key candida
     ]);
   });
 
-  const { files: [file] } = await inspectFiles([path], { sheet: '数据' });
+  const { files: [file] } = await inspectFiles(await filePair(path), { sheet: '数据' });
 
   assert.deepEqual(file.headers.map(({ raw, normalized }) => ({ raw, normalized })), [
     { raw: 'Ａ', normalized: 'A' },
@@ -127,10 +134,24 @@ test('records NFKC duplicate headers as risks and excludes them from key candida
   assert.deepEqual(file.keyCandidates, [{ columns: ['唯一'], duplicateRate: 0, sampledRows: 2 }]);
 });
 
+test('requires at least two XLSX inputs', async (t) => {
+  const path = await workbookFixture(t, 'single.xlsx', async (workbook) => {
+    workbook.addWorksheet('数据').addRow(['编号']);
+  });
+
+  for (const paths of [[path], []]) {
+    await assert.rejects(
+      () => inspectFiles(paths, { sheet: '数据' }),
+      (error) => error?.code === 'INPUT_ERROR' && error.message === 'at least two XLSX inputs are required'
+    );
+  }
+});
+
 test('resolves real XLSX inputs and rejects duplicate, unreadable, non-XLSX, and missing-sheet inputs', async (t) => {
   const path = await workbookFixture(t, 'input.xlsx', async (workbook) => {
     workbook.addWorksheet('实际表').addRow(['编号']);
   });
+  const paths = await filePair(path);
   const text = join(await realpath(join(path, '..')), 'input.txt');
   await writeFile(text, 'not xlsx');
 
@@ -139,15 +160,15 @@ test('resolves real XLSX inputs and rejects duplicate, unreadable, non-XLSX, and
     (error) => error?.code === 'INPUT_ERROR' && /duplicate input path/.test(error.message)
   );
   await assert.rejects(
-    () => inspectFiles([text], { sheet: '实际表' }),
+    () => inspectFiles([text, paths[0]], { sheet: '实际表' }),
     (error) => error?.code === 'INPUT_ERROR' && /\.xlsx/.test(error.message)
   );
   await assert.rejects(
-    () => inspectFiles([join(path, '..', 'missing.xlsx')], { sheet: '实际表' }),
+    () => inspectFiles([join(path, '..', 'missing.xlsx'), paths[0]], { sheet: '实际表' }),
     (error) => error?.code === 'INPUT_ERROR'
   );
   await assert.rejects(
-    () => inspectFiles([path], { sheet: '不存在' }),
+    () => inspectFiles(paths, { sheet: '不存在' }),
     (error) => error?.code === 'SHEET_NOT_FOUND' && error.message === 'sheet 不存在 not found; available: 实际表'
   );
 });

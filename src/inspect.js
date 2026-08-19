@@ -11,7 +11,7 @@ function invalid(message) {
 }
 
 async function resolveFiles(paths) {
-  if (!Array.isArray(paths) || paths.length === 0) throw invalid('at least one XLSX input is required');
+  if (!Array.isArray(paths) || paths.length < 2) throw invalid('at least two XLSX inputs are required');
   const files = [];
   const seen = new Set();
   for (const input of paths) {
