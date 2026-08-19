@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { copyFile, mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -27,8 +27,8 @@ function parseArgs(args) {
 async function main() {
   const { check, root } = parseArgs(process.argv.slice(2));
   const source = resolve(root, 'skill/SKILL.md');
+  const expected = await readFile(source);
   if (check) {
-    const expected = await readFile(source);
     for (const target of targets) {
       let actual;
       try { actual = await readFile(resolve(root, target)); } catch {}
@@ -39,7 +39,7 @@ async function main() {
   for (const target of targets) {
     const destination = resolve(root, target);
     await mkdir(dirname(destination), { recursive: true });
-    await copyFile(source, destination);
+    await writeFile(destination, expected);
   }
 }
 

@@ -34,6 +34,7 @@ Inspect first, resolve ambiguity with the user, then compare from a validated Co
 ## Safety and reporting
 
 - Never use `eval`, `Function`, temporary JavaScript, or arbitrary SQL to execute user-supplied conditions.
+- Never execute workbook macros, formulas, or external links; inspect formula metadata and cached values only.
 - After a successful comparison, cite `summary.json` and the absolute artifact directory. Read at most `output.sampleSize` detail records across the detail artifacts when giving examples; leave complete results in the artifacts.
 - On failure, cite the structured error code and do not say the comparison completed.
 - In every delivery state that formulas are not recalculated, precision already lost from overlong Excel numeric cells cannot be recovered, sampled key candidates are provisional, and full duplicate-key validation occurs during comparison.

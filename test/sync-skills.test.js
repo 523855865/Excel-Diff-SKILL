@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -44,6 +44,18 @@ test('check fails until sync creates byte-identical copies and detects drift', a
   const drifted = run('--check', '--root', root);
   assert.notEqual(drifted.status, 0);
   assert.match(drifted.stderr, /out of sync/i);
+});
+
+test('write mode creates no target directories when the canonical skill is missing', async (t) => {
+  const root = await makeTempDir();
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const result = run('--root', root);
+
+  assert.notEqual(result.status, 0);
+  for (const directory of ['.agents', 'plugins']) {
+    await assert.rejects(access(join(root, directory)), { code: 'ENOENT' });
+  }
 });
 
 test('rejects unknown, duplicate, and missing-value arguments', () => {
