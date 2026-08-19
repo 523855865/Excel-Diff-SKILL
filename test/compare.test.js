@@ -176,7 +176,12 @@ test('keeps an accessible temp directory on success and failure only when reques
   await access(result.tempDirectory);
   const [partitionName] = await readdir(result.tempDirectory);
   const rawRecords = (await readFile(join(result.tempDirectory, partitionName), 'utf8')).trim().split('\n');
-  assert.equal(rawRecords.every((line) => Array.isArray(JSON.parse(line)) && JSON.parse(line).length === 8), true);
+  assert.equal(rawRecords.every((line) => Array.isArray(JSON.parse(line)) && JSON.parse(line).length === 7), true);
+  for (const line of rawRecords) {
+    const tuple = JSON.parse(line);
+    assert.deepEqual(JSON.parse(tuple[1]), [['string', '1']]);
+    assert.equal(tuple.slice(2).some((item) => JSON.stringify(item) === JSON.stringify([['string', '1']])), false);
+  }
   assert.equal(/编号|rowBytes|keyHash|fileId/.test(rawRecords.join('\n')), false);
   await rm(result.tempDirectory, { recursive: true, force: true });
 
@@ -369,7 +374,7 @@ test('emits recursively repartitioned sink records in stable logical hash order'
   const rules = spec(directory, files, {
     filters: [],
     columnAliases: {},
-    resources: { maxPartitionBytes: 550, maxTempBytes: 1_000_000 }
+    resources: { maxPartitionBytes: 500, maxTempBytes: 1_000_000 }
   });
 
   const runs = [];

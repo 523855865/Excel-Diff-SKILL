@@ -158,7 +158,6 @@ export async function comparePartitioned(spec, sink = {}, options = {}) {
         await store.append([
           sha256(keyEncoding),
           keyEncoding,
-          key,
           row.fileId,
           row.sheetName,
           row.rowNumber,
@@ -209,14 +208,16 @@ export async function comparePartitioned(spec, sink = {}, options = {}) {
       const boundedPaths = await repartition(path, 1, {
         maxPartitionBytes: limits.maxPartitionBytes,
         maxTempBytes: limits.maxTempBytes,
-        maxOpenFiles: 32
+        maxOpenFiles: 32,
+        check: enforceRuntime
       });
       enforceRuntime();
       for (const boundedPath of boundedPaths) {
         const entries = new Map();
         for await (const tuple of readPartition(boundedPath)) {
           enforceRuntime();
-          const [keyHash, keyEncoding, key, fileId, sheetName, rowNumber, rowHash, values] = tuple;
+          const [keyHash, keyEncoding, fileId, sheetName, rowNumber, rowHash, values] = tuple;
+          const key = JSON.parse(keyEncoding);
           const row = { keyHash, keyEncoding, key, fileId, sheetName, rowNumber, rowHash, values, rowBytes: JSON.stringify(values) };
           let entry = entries.get(row.keyEncoding);
           if (!entry) {

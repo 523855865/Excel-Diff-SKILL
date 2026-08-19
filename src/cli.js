@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { CompareError, compare } from './compare.js';
+import { PartitionError } from './partitions.js';
 import { InputError } from './read-xlsx.js';
 import { writeReport } from './report.js';
 import { SpecError, loadSpec } from './spec.js';
@@ -19,9 +20,9 @@ function specPath(args) {
 }
 
 function failure(error) {
-  const known = error instanceof UsageError || error instanceof SpecError
-    || error instanceof InputError || error instanceof CompareError;
-  const exitCode = error instanceof InputError || error instanceof CompareError ? 4 : known ? 2 : 6;
+  const comparisonError = error instanceof InputError || error instanceof CompareError || error instanceof PartitionError;
+  const known = error instanceof UsageError || error instanceof SpecError || comparisonError;
+  const exitCode = comparisonError ? 4 : known ? 2 : 6;
   const output = {
     status: 'FAILED',
     code: known ? error.code : 'INTERNAL_ERROR',

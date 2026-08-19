@@ -218,6 +218,7 @@ export async function* readPartition(path) {
 }
 
 async function splitPartition(path, depth, context) {
+  context.check();
   const parentSize = (await stat(path)).size;
   if (parentSize <= context.maxPartitionBytes) return [path];
   if (depth >= 32) {
@@ -237,18 +238,22 @@ async function splitPartition(path, depth, context) {
     let firstHash;
     let mixedHashes = false;
     for await (const record of readPartition(path)) {
+      context.check();
       const keyHash = keyHashOf(record);
       firstHash ??= keyHash;
       if (keyHash !== firstHash) mixedHashes = true;
       await children.append(record, depth);
+      context.check();
     }
     await children.close();
+    context.check();
     if (!mixedHashes) {
       throw new PartitionError('HOT_KEY_TOO_LARGE', 'single key exceeds resources.maxPartitionBytes');
     }
 
     const boundedPaths = [];
     for (const childPath of children.partitionPaths()) {
+      context.check();
       boundedPaths.push(...await splitPartition(childPath, depth + 1, context));
     }
     await rm(path);
@@ -262,6 +267,8 @@ async function splitPartition(path, depth, context) {
 }
 
 export async function repartition(path, depth, options = {}) {
+  const check = options.check ?? (() => {});
+  check();
   const parentSize = (await stat(path)).size;
   const maxPartitionBytes = options.maxPartitionBytes ?? Infinity;
   if (parentSize <= maxPartitionBytes) return [path];
@@ -279,7 +286,8 @@ export async function repartition(path, depth, options = {}) {
     maxOpenFiles: options.maxOpenFiles ?? 32,
     maxPartitionBytes,
     stagingRoot,
-    tracker: activeTracker
+    tracker: activeTracker,
+    check
   };
   try {
     return await splitPartition(path, depth, context);

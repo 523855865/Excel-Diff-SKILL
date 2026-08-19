@@ -156,6 +156,21 @@ test('returns a redacted duplicate-key failure', async (t) => {
   assert.doesNotMatch(result.stderr, /SECRET-EMP-001/);
 });
 
+test('returns stable partition resource errors instead of INTERNAL_ERROR', async (t) => {
+  const directory = await fixtures(t);
+  for (const [code, resources] of [
+    ['TEMP_LIMIT_EXCEEDED', { maxTempBytes: 1 }],
+    ['HOT_KEY_TOO_LARGE', { maxPartitionBytes: 1 }]
+  ]) {
+    const spec = await writeSpec(directory, { resources });
+    const result = run(['compare', '--spec', spec]);
+
+    assert.equal(result.status, 4);
+    const output = failure(result, code);
+    assert.notEqual(output.code, 'INTERNAL_ERROR');
+  }
+});
+
 test('rejects unknown commands and missing --spec as usage errors', () => {
   const unknown = run(['unknown', '--spec', 'ignored.json']);
   const missing = run(['compare']);

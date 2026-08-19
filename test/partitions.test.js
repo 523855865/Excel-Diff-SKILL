@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import test from 'node:test';
 
 import {
@@ -54,7 +54,7 @@ test('writes records to sorted default-depth partitions and preserves them', asy
 test('routes compact tuple records by their first hash field', async (t) => {
   const store = await PartitionStore.create();
   t.after(() => store.cleanup());
-  const tuple = [sha256('tuple'), 'encoded', [['string', 'tuple']], 'A', '人员', 2, sha256('[]'), []];
+  const tuple = [sha256('tuple'), '[["string","tuple"]]', 'A', '人员', 2, sha256('[]'), []];
 
   await store.append(tuple);
   await store.close();
@@ -66,7 +66,7 @@ test('exposes its absolute run directory before any partition exists', async (t)
   const store = await PartitionStore.create();
   t.after(() => store.cleanup());
 
-  assert.equal(store.directory.startsWith('/'), true);
+  assert.equal(isAbsolute(store.directory), true);
   assert.deepEqual(store.partitionPaths(), []);
   assert.equal(store.root, undefined);
 });
@@ -211,6 +211,32 @@ test('recursively splits an oversized mixed-key parent into bounded children', a
   for (const path of children) assert.equal((await stat(path)).size <= 600, true);
   assert.deepEqual((await Promise.all(children.map(collect))).flat().map(({ key }) => key).sort(), records.map(({ key }) => key).sort());
   await assert.rejects(() => access(parent));
+});
+
+test('checks deadlines while streaming records during repartition', async (t) => {
+  const store = await PartitionStore.create();
+  t.after(() => store.cleanup());
+  const records = Array.from({ length: 12 }, (_, index) => ({
+    key: `deadline-${index}`,
+    keyHash: `aa${(index % 4).toString(16).padStart(2, '0')}${String(index).padStart(60, '0')}`,
+    payload: 'x'.repeat(80)
+  }));
+  for (const item of records) await store.append(item);
+  await store.close();
+  const [parent] = store.partitionPaths();
+  const sentinel = new Error('deadline reached');
+  let checks = 0;
+
+  await assert.rejects(
+    () => repartition(parent, 1, {
+      maxPartitionBytes: 600,
+      maxTempBytes: 1024 * 1024,
+      check: () => { if (++checks === 3) throw sentinel; }
+    }),
+    (error) => error === sentinel
+  );
+  assert.equal(checks, 3);
+  await access(parent);
 });
 
 test('failed repartition removes staged children and can be retried without duplicates', async (t) => {
