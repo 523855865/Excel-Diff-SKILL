@@ -38,8 +38,16 @@ function limitsFor(spec) {
 }
 
 function comparisonColumns(spec, columns) {
-  return (spec.compareColumns === '*' ? columns : spec.compareColumns)
-    .filter((column) => !spec.mode.keyColumns.includes(column));
+  const selected = spec.compareColumns === '*' ? columns : spec.compareColumns;
+  return spec.mode.type === 'row' || spec.mode.type === 'multiset'
+    ? selected
+    : selected.filter((column) => !spec.mode.keyColumns.includes(column));
+}
+
+function rowKey(spec, compareColumns, row) {
+  if (spec.mode.type === 'row') return [['number', row.rowNumber]];
+  if (spec.mode.type === 'multiset') return compareColumns.map((column) => row.values[column]);
+  return spec.mode.keyColumns.map((column) => row.values[column]);
 }
 
 function resourceError(code, resource) {
@@ -61,6 +69,23 @@ async function inputBytes(files) {
 }
 
 async function processEntry(entry, spec, compareColumns, valueIndexes, sink, summary, enforceRuntime) {
+  if (spec.mode.type === 'multiset') {
+    const counts = Object.fromEntries(spec.files.map(({ id }) => [id, entry.rows.get(id)?.length ?? 0]));
+    if (spec.files.every(({ id }) => counts[id] === counts[spec.baseline])) {
+      summary.identicalKeys += 1;
+      return;
+    }
+    summary.changedKeys += 1;
+    await sink.onMultiset?.({
+      values: entry.key,
+      sheetName: entry.rows.values().next().value[0].sheetName,
+      counts,
+      baselineRelation: counts[spec.baseline] === 0 ? 'ADDED' : 'DELETED'
+    });
+    enforceRuntime();
+    return;
+  }
+
   const duplicateFiles = spec.files
     .filter(({ id }) => (entry.rows.get(id)?.length ?? 0) > 1)
     .map(({ id }) => id);
@@ -151,12 +176,17 @@ export async function comparePartitioned(spec, sink = {}, options = {}) {
         compareColumns ??= comparisonColumns(spec, rowColumns);
         const selected = new Set(compareColumns);
         valueColumns ??= rowColumns.filter((column) => selected.has(column));
-        const key = spec.mode.keyColumns.map((column) => row.values[column]);
+        const key = rowKey(spec, compareColumns, row);
         const keyEncoding = encodeKey(key);
+        const keyHash = sha256(keyEncoding);
+        if (spec.mode.type === 'multiset') {
+          await store.append([keyHash, keyEncoding, row.fileId, row.sheetName, row.rowNumber]);
+          return;
+        }
         const values = valueColumns.map((column) => row.values[column]);
         const rowBytes = JSON.stringify(values);
         await store.append([
-          sha256(keyEncoding),
+          keyHash,
           keyEncoding,
           row.fileId,
           row.sheetName,
@@ -262,10 +292,12 @@ export async function compare(spec) {
   const changed = [];
   const missing = [];
   const duplicates = [];
+  const multiset = [];
   const { summary } = await comparePartitioned(spec, {
     onChanged: async (item) => changed.push(item),
     onMissing: async (item) => missing.push(item),
-    onDuplicate: async (item) => duplicates.push(item)
+    onDuplicate: async (item) => duplicates.push(item),
+    onMultiset: async (item) => multiset.push(item)
   });
   const byKey = (left, right) => {
     const leftKey = encodeKey(left.key);
@@ -275,5 +307,10 @@ export async function compare(spec) {
   changed.sort(byKey);
   missing.sort(byKey);
   duplicates.sort(byKey);
-  return { summary, changed, missing, duplicates };
+  const result = { summary, changed, missing, duplicates };
+  if (spec.mode.type === 'multiset') {
+    multiset.sort((left, right) => byKey({ key: left.values }, { key: right.values }));
+    result.multiset = multiset;
+  }
+  return result;
 }

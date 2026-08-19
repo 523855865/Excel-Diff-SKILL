@@ -281,3 +281,45 @@ test('writeReport creates unique runs and writes header-only CSVs for empty deta
   assert.equal(await readFile(join(first.directory, 'changed.csv'), 'utf8'), 'key,sheet,column,B.value,B.type,B.row,A.value,A.type,A.row,C.value,C.type,C.row\n');
   assert.equal(await readFile(join(first.directory, 'missing.csv'), 'utf8'), 'key,sheet,presentFiles,missingFiles,baselineRelation\n');
 });
+
+test('writeReport writes protected deterministic multiset output only for multiset mode', async (t) => {
+  const directory = await makeTempDir();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const spec = {
+    ...reportSpec(directory, ['B', 'A', 'C']),
+    mode: { type: 'multiset' }
+  };
+  const result = reportResult({
+    multiset: [
+      {
+        values: [typed('string', 'ä')],
+        sheetName: 'Data',
+        counts: { A: 0, B: 1, C: 0 },
+        baselineRelation: 'ADDED'
+      },
+      {
+        values: [typed('string', 'z')],
+        sheetName: 'Data',
+        counts: { A: 2, B: 1, C: 0 },
+        baselineRelation: 'DELETED'
+      }
+    ]
+  });
+
+  const report = await writeReport(spec, result);
+  const multiset = parseCsv(await readFile(join(report.directory, 'multiset.csv'), 'utf8'));
+
+  assert.deepEqual(multiset, [
+    ['values', 'sheet', 'B.count', 'A.count', 'C.count', 'baselineRelation'],
+    [JSON.stringify(['z']), 'Data', '1', '2', '0', 'DELETED'],
+    [JSON.stringify(['ä']), 'Data', '1', '0', '0', 'ADDED']
+  ]);
+  assert.deepEqual(report.summary.artifacts, {
+    changed: 'changed.csv',
+    missing: 'missing.csv',
+    multiset: 'multiset.csv'
+  });
+
+  const keyReport = await writeReport(reportSpec(directory), reportResult());
+  await assert.rejects(() => readFile(join(keyReport.directory, 'multiset.csv'), 'utf8'));
+});

@@ -63,16 +63,34 @@ export async function writeReport(spec, result) {
       displayKey(entry.key), safeText(entry.sheetName), JSON.stringify(entry.presentFiles), JSON.stringify(entry.missingFiles), entry.baselineRelation
     ])
   ];
+  const multisetRows = [
+    ['values', 'sheet', ...fileIds.map((fileId) => safeText(`${fileId}.count`)), 'baselineRelation'],
+    ...[...(result.multiset ?? [])]
+      .sort((left, right) => {
+        const leftValues = JSON.stringify(left.values);
+        const rightValues = JSON.stringify(right.values);
+        return (leftValues > rightValues) - (leftValues < rightValues);
+      })
+      .map((entry) => [
+        safeValue(entry.values.map(untypedValue)),
+        safeText(entry.sheetName),
+        ...fileIds.map((fileId) => entry.counts[fileId]),
+        entry.baselineRelation
+      ])
+  ];
+  const artifacts = { changed: 'changed.csv', missing: 'missing.csv' };
+  if (spec.mode?.type === 'multiset') artifacts.multiset = 'multiset.csv';
   const summary = {
     ...result.summary,
     status: 'COMPLETED',
     runId: id,
-    artifacts: { changed: 'changed.csv', missing: 'missing.csv' }
+    artifacts
   };
 
   await mkdir(directory, { recursive: true });
   await writeFile(join(directory, 'changed.csv'), csv(changedRows), 'utf8');
   await writeFile(join(directory, 'missing.csv'), csv(missingRows), 'utf8');
+  if (spec.mode?.type === 'multiset') await writeFile(join(directory, 'multiset.csv'), csv(multisetRows), 'utf8');
   await writeFile(join(directory, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
   return { directory, summary };
 }

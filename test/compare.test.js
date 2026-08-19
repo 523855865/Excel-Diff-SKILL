@@ -74,6 +74,7 @@ test('aggregates typed keys, classifies rows, and preserves file and field order
 
   const result = await compare(spec(directory, files));
 
+  assert.deepEqual(Object.keys(result), ['summary', 'changed', 'missing', 'duplicates']);
   assert.deepEqual(result.summary, {
     files: 3,
     totalRowsScanned: 18,
@@ -400,6 +401,152 @@ test('preserves canonical numeric-like header order in star comparisons', async 
   }));
 
   assert.deepEqual(result.changed.map(({ column }) => column), ['10', '2']);
+});
+
+test('row mode compares physical rows after insertions and reports only the short tail as missing', async (t) => {
+  const { directory, files } = await filesFor(t, {
+    A: [['姓名', '部门'], ['Ada', 'HR'], ['Bob', 'IT']],
+    B: [['姓名', '部门'], ['New', 'Ops'], ['Ada', 'HR'], ['Bob', 'IT']]
+  }, ['A', 'B']);
+
+  const result = await compare(spec(directory, files, {
+    mode: { type: 'row' },
+    filters: [],
+    columnAliases: {},
+    duplicateKeyPolicy: 'fail'
+  }));
+
+  assert.deepEqual(Object.keys(result), ['summary', 'changed', 'missing', 'duplicates']);
+  assert.deepEqual(result.changed.map(({ key, column }) => [key, column]), [
+    [[['number', 2]], '姓名'],
+    [[['number', 2]], '部门'],
+    [[['number', 3]], '姓名'],
+    [[['number', 3]], '部门']
+  ]);
+  assert.deepEqual(result.missing, [{
+    key: [['number', 4]],
+    sheetName: '人员',
+    presentFiles: ['B'],
+    missingFiles: ['A'],
+    baselineRelation: 'ADDED'
+  }]);
+  assert.deepEqual(result.duplicates, []);
+  assert.deepEqual(result.summary, {
+    files: 2,
+    totalRowsScanned: 5,
+    matchedRows: 5,
+    identicalKeys: 0,
+    changedKeys: 2,
+    missingKeys: 1,
+    duplicateKeys: 0,
+    invalidRows: 0
+  });
+});
+
+test('multiset mode ignores row order and equal duplicate counts', async (t) => {
+  const { directory, files } = await filesFor(t, {
+    A: [['姓名', '部门'], ['Ada', 'HR'], ['Bob', 'IT'], ['Ada', 'HR']],
+    B: [['姓名', '部门'], ['Bob', 'IT'], ['Ada', 'HR'], ['Ada', 'HR']],
+    C: [['姓名', '部门'], ['Ada', 'HR'], ['Ada', 'HR'], ['Bob', 'IT']]
+  }, ['A', 'B', 'C']);
+
+  const result = await compare(spec(directory, files, {
+    mode: { type: 'multiset' },
+    filters: [],
+    columnAliases: {}
+  }));
+
+  assert.deepEqual(Object.keys(result), ['summary', 'changed', 'missing', 'duplicates', 'multiset']);
+  assert.equal(result.summary.identicalKeys, 2);
+  assert.equal(result.summary.changedKeys, 0);
+  assert.deepEqual(result.multiset, []);
+  assert.deepEqual(result.duplicates, []);
+});
+
+test('multiset mode reports filtered count differences and baseline relations', async (t) => {
+  const { directory, files } = await filesFor(t, {
+    A: [
+      ['姓名', '部门', '状态'],
+      ['Ada', 'HR', 'active'], ['Ada', 'HR', 'active'], ['Bob', 'IT', 'active'], ['Ada', 'HR', 'inactive']
+    ],
+    B: [
+      ['姓名', '部门', '状态'],
+      ['Bob', 'IT', 'active'], ['Ada', 'HR', 'active'], ['Dan', 'Ops', 'active'], ['Ada', 'HR', 'inactive']
+    ],
+    C: [
+      ['姓名', '部门', '状态'],
+      ['Dan', 'Ops', 'active'], ['Bob', 'IT', 'active'], ['Dan', 'Ops', 'active'], ['Ada', 'HR', 'inactive']
+    ]
+  }, ['A', 'B', 'C']);
+  const rules = spec(directory, files, {
+    mode: { type: 'multiset' },
+    compareColumns: ['姓名', '部门'],
+    filters: [{ column: '状态', operator: 'eq', value: 'active' }],
+    columnAliases: {}
+  });
+  const streamed = [];
+
+  const partitioned = await comparePartitioned(rules, {
+    onMultiset: async (item) => { await Promise.resolve(); streamed.push(item); }
+  });
+  const result = await compare(rules);
+  const expected = [
+    {
+      values: [['string', 'Ada'], ['string', 'HR']],
+      sheetName: '人员',
+      counts: { A: 2, B: 1, C: 0 },
+      baselineRelation: 'DELETED'
+    },
+    {
+      values: [['string', 'Dan'], ['string', 'Ops']],
+      sheetName: '人员',
+      counts: { A: 0, B: 1, C: 2 },
+      baselineRelation: 'ADDED'
+    }
+  ];
+
+  assert.deepEqual(result.multiset, expected);
+  assert.deepEqual([...streamed].sort((left, right) => JSON.stringify(left.values).localeCompare(JSON.stringify(right.values))), expected);
+  assert.equal(partitioned.summary.changedKeys, 2);
+  assert.equal(partitioned.summary.identicalKeys, 1);
+  assert.equal(partitioned.summary.missingKeys, 0);
+  assert.equal(partitioned.summary.duplicateKeys, 0);
+  assert.equal(partitioned.summary.matchedRows, 9);
+});
+
+test('multiset temp tuples store long typed values once and preserve count output', async (t) => {
+  const longValue = `LONG-VALUE-${'x'.repeat(10_000)}`;
+  const { directory, files } = await filesFor(t, {
+    A: [['value'], [longValue]],
+    B: [['value'], [longValue], [longValue]]
+  }, ['A', 'B']);
+  const details = [];
+  const result = await comparePartitioned(spec(directory, files, {
+    mode: { type: 'multiset' },
+    filters: [],
+    columnAliases: {}
+  }), {
+    onMultiset: async (item) => details.push(item)
+  }, { keepTemp: true });
+  t.after(() => rm(result.tempDirectory, { recursive: true, force: true }));
+
+  const partitionNames = await readdir(result.tempDirectory);
+  const rawRecords = (await Promise.all(partitionNames.map(async (name) =>
+    (await readFile(join(result.tempDirectory, name), 'utf8')).trim().split('\n')
+  ))).flat();
+  assert.equal(rawRecords.length, 3);
+  for (const line of rawRecords) {
+    const tuple = JSON.parse(line);
+    assert.equal(tuple.length, 5);
+    assert.deepEqual(JSON.parse(tuple[1]), [['string', longValue]]);
+    assert.equal(line.split(longValue).length - 1, 1);
+  }
+  assert.deepEqual(details, [{
+    values: [['string', longValue]],
+    sheetName: '人员',
+    counts: { A: 1, B: 2 },
+    baselineRelation: 'DELETED'
+  }]);
 });
 
 test('redacts sensitive duplicate keys and classifies duplicates before missing rows', async (t) => {
