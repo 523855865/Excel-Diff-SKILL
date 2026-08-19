@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, chmod, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, readFile, realpath, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -133,6 +133,96 @@ test('compare emits one completed JSON summary and report artifacts', async (t) 
     Object.fromEntries(Object.keys(output).filter((key) => key !== 'directory').map((key) => [key, output[key]])),
     JSON.parse(await readFile(join(output.directory, 'summary.json'), 'utf8'))
   );
+});
+
+test('inspect emits one structured JSON result for two workbooks', async (t) => {
+  const directory = await fixtures(t);
+  const before = join(directory, 'before.xlsx');
+  const after = join(directory, 'after.xlsx');
+
+  const result = run(['inspect', '--files', before, after, '--sheet', '人员']);
+
+  assert.equal(result.status, 0);
+  const output = response(result);
+  assert.equal(output.status, 'INSPECTED');
+  assert.equal(output.fullTypes, false);
+  assert.deepEqual(output.files.map(({ file }) => file), [await realpath(before), await realpath(after)]);
+  assert.deepEqual(output.files[0].headers.map(({ raw }) => raw), ['编号', '姓名']);
+});
+
+test('inspect maps --full-types to a complete type scan', async (t) => {
+  const directory = await fixtures(t);
+
+  const result = run([
+    'inspect', '--full-types', '--sheet', '人员', '--files',
+    join(directory, 'before.xlsx'), join(directory, 'after.xlsx')
+  ]);
+
+  assert.equal(result.status, 0);
+  assert.equal(response(result).fullTypes, true);
+});
+
+test('inspect returns a value-free duplicate-header prompt on stdout with exit 3', async (t) => {
+  const directory = await fixtures(t, [
+    ['Ａ', 'A', '唯一'],
+    ['SECRET-LEFT', 'SECRET-RIGHT', 'SECRET-KEY']
+  ]);
+  const before = join(directory, 'before.xlsx');
+  const after = join(directory, 'after.xlsx');
+
+  const result = run(['inspect', '--files', before, after, '--sheet', '人员']);
+
+  assert.equal(result.status, 3);
+  const output = response(result);
+  const files = await Promise.all([before, after].map((file) => realpath(file)));
+  assert.deepEqual(output, {
+    status: 'NEEDS_INPUT',
+    code: 'HEADER_DUPLICATED',
+    files: files.map((file) => ({
+      file,
+      sheet: '人员',
+      duplicates: [{
+        normalized: 'A',
+        columns: [
+          { index: 1, raw: 'Ａ' },
+          { index: 2, raw: 'A' }
+        ]
+      }]
+    }))
+  });
+  assert.doesNotMatch(result.stdout, /SECRET-/);
+});
+
+test('inspect reports a missing sheet on stderr with exit 4', async (t) => {
+  const directory = await fixtures(t);
+
+  const result = run([
+    'inspect', '--files', join(directory, 'before.xlsx'), join(directory, 'after.xlsx'),
+    '--sheet', '不存在'
+  ]);
+
+  assert.equal(result.status, 4);
+  failure(result, 'SHEET_NOT_FOUND');
+});
+
+test('inspect rejects invalid grammar and fewer than two files as usage errors', async (t) => {
+  const directory = await fixtures(t);
+  const before = join(directory, 'before.xlsx');
+  const after = join(directory, 'after.xlsx');
+  const cases = [
+    ['inspect', '--files', before, '--sheet', '人员'],
+    ['inspect', '--files', before, after],
+    ['inspect', '--sheet', '人员', '--files'],
+    ['inspect', '--files', before, after, '--sheet', '人员', '--sheet', '人员'],
+    ['inspect', '--files', before, after, '--sheet', '人员', '--unknown'],
+    ['inspect', '--files', before, after, '--sheet', '人员', '--full-types', '--full-types']
+  ];
+
+  for (const args of cases) {
+    const result = run(args);
+    assert.equal(result.status, 2, args.join(' '));
+    failure(result, 'USAGE');
+  }
 });
 
 test('progress is throttled and keep-temp works with optional flags in any order', async (t) => {
