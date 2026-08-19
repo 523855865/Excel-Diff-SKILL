@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import { makeTempDir } from './helpers.js';
 import { inspectFiles } from '../src/inspect.js';
+import { PartitionError } from '../src/partitions.js';
 
 async function workbookFixture(t, name, build) {
   const directory = await makeTempDir();
@@ -105,6 +106,44 @@ test('bounds sampled types and candidate memory while fullTypes scans every data
       sampledRows: 2
     });
   }
+});
+
+test('counts sparse row gaps inside the sampling boundary', async (t) => {
+  const path = await workbookFixture(t, 'sparse.xlsx', async (workbook) => {
+    const sheet = workbook.addWorksheet('数据');
+    sheet.addRow(['编号', '值']);
+    sheet.addRow(['A', 1]);
+    sheet.getCell('A4').value = 'B';
+    sheet.getCell('B4').value = 'outside-sample';
+  });
+
+  const { files: [file] } = await inspectFiles(await filePair(path), { sheet: '数据', sampleRows: 2 });
+
+  assert.equal(file.sampledRows, 2);
+  assert.deepEqual(file.headers, [
+    { index: 1, raw: '编号', normalized: '编号', types: { string: 1, blank: 1 }, emptyRatio: 0.5 },
+    { index: 2, raw: '值', normalized: '值', types: { number: 1, blank: 1 }, emptyRatio: 0.5 }
+  ]);
+  assert.deepEqual(file.keyCandidates, []);
+});
+
+test('enforces the inspection temp budget and preserves its PartitionError', async (t) => {
+  const path = await workbookFixture(t, 'temp-budget.xlsx', async (workbook) => {
+    workbook.addWorksheet('数据').addRows([
+      ['编号', '名称'],
+      ['1', 'shared-string']
+    ]);
+  });
+  const paths = await filePair(path);
+
+  await assert.rejects(
+    () => inspectFiles(paths, { sheet: '数据', maxTempBytes: 1 }),
+    (error) => error instanceof PartitionError && error.code === 'TEMP_LIMIT_EXCEEDED'
+  );
+  await assert.rejects(
+    () => inspectFiles(paths, { sheet: '数据', maxTempBytes: 0 }),
+    (error) => error?.code === 'INPUT_ERROR' && error.message === 'maxTempBytes must be a positive integer'
+  );
 });
 
 test('records NFKC duplicate headers as risks and excludes them from key candidates', async (t) => {

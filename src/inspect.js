@@ -4,7 +4,10 @@ import { extname, resolve } from 'node:path';
 
 import { openStreamingWorkbook } from './exceljs-stream-compat.js';
 import { encodeKey, normalizeValue } from './normalize.js';
+import { PartitionError } from './partitions.js';
 import { InputError } from './read-xlsx.js';
+
+const defaultMaxTempBytes = 50 * 1024 ** 3;
 
 function invalid(message) {
   return new InputError('INPUT_ERROR', message);
@@ -82,7 +85,7 @@ async function inspectFile(file, options) {
   let compatibility;
   let failure;
   try {
-    compatibility = await openStreamingWorkbook(file, options.sheet);
+    compatibility = await openStreamingWorkbook(file, options.sheet, { maxTempBytes: options.maxTempBytes });
     const sheets = (compatibility.workbook.model.sheets ?? []).map(({ name, state }) => ({
       name,
       visibility: state ?? 'visible'
@@ -174,7 +177,12 @@ async function inspectFile(file, options) {
       risks
     };
   } catch (error) {
-    failure = error instanceof InputError ? error : invalid(`cannot read XLSX input: ${file}`);
+    if (error instanceof InputError || error instanceof PartitionError || error?.code === 'ENOSPC' || error?.code === 'EDQUOT') {
+      failure = error;
+    } else {
+      failure = invalid(`cannot read XLSX input: ${file}`);
+      if (error?.cleanupError) failure.cleanupError = error.cleanupError;
+    }
     throw failure;
   } finally {
     if (compatibility) {
@@ -196,14 +204,23 @@ async function inspectFile(file, options) {
   }
 }
 
-export async function inspectFiles(paths, { sheet, headerRow = 1, sampleRows = 10_000, fullTypes = false } = {}) {
+export async function inspectFiles(paths, {
+  sheet,
+  headerRow = 1,
+  sampleRows = 10_000,
+  fullTypes = false,
+  maxTempBytes = defaultMaxTempBytes
+} = {}) {
   if (typeof sheet !== 'string' || sheet === '') throw invalid('sheet is required');
   if (!Number.isInteger(headerRow) || headerRow < 1) throw invalid('headerRow must be a positive integer');
   if (!Number.isInteger(sampleRows) || sampleRows < 1) throw invalid('sampleRows must be a positive integer');
   if (typeof fullTypes !== 'boolean') throw invalid('fullTypes must be boolean');
+  if (!Number.isInteger(maxTempBytes) || maxTempBytes < 1) throw invalid('maxTempBytes must be a positive integer');
   const pathsToInspect = await resolveFiles(paths);
   const files = [];
-  for (const file of pathsToInspect) files.push(await inspectFile(file, { sheet, headerRow, sampleRows, fullTypes }));
+  for (const file of pathsToInspect) {
+    files.push(await inspectFile(file, { sheet, headerRow, sampleRows, fullTypes, maxTempBytes }));
+  }
   return {
     status: 'INSPECTED',
     sampleRows,
