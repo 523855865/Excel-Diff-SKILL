@@ -31,6 +31,59 @@ Inspect first, resolve ambiguity with the user, then compare from a validated Co
    excel-diff compare --spec "/abs/compare.json"
    ```
 
+## CompareSpec field reference
+
+Unknown fields are rejected. `files[].path` and `output.directory` are resolved relative to the CompareSpec file.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `version` | yes | Must be `"1.0"`. |
+| `baseline` | yes | The `files[].id` used as the reference for added, deleted, and changed results. |
+| `files` | yes | At least two `{id,path}` entries. IDs and resolved paths must be unique; paths must end in `.xlsx`. |
+| `sheet` | yes | `{name,headerRow}` selects one worksheet and its 1-based physical header row in every file. |
+| `mode` | yes | `{type:"key",keyColumns:[...]}`, `{type:"row"}`, or `{type:"multiset"}`. |
+| `compareColumns` | yes | `"*"` for every baseline header, or a non-empty unique list of column names. |
+| `columnAliases` | no | `{canonicalName:[alternateHeader,...]}`; exact and NFKC header matches take precedence, and ambiguous mappings fail. Default `{}`. |
+| `filters` | no | Row filters applied with AND before key validation and comparison. Default `[]`. |
+| `normalization` | no | Global value rules plus per-column overrides. |
+| `duplicateKeyPolicy` | yes | `report` writes duplicate-key details and skips comparison for those keys; `fail` stops with `DUPLICATE_KEY`. Required in every mode. |
+| `resources` | no | Positive integer resource limits; omitted values receive schema defaults. |
+| `output` | yes | `{directory,sampleSize?}` for the report root and delivery sample limit. |
+
+Nested fields and semantics:
+
+| Field | Meaning |
+| --- | --- |
+| `files[].id` | Non-empty file identifier used by `baseline`, reports, and errors. |
+| `files[].path` | Input XLSX path. |
+| `sheet.name` | Worksheet name shared by all inputs. |
+| `sheet.headerRow` | Header row number; following physical rows are data. |
+| `mode.keyColumns` | Required only for `key`; typed business-key columns, excluded from value comparison. Blank keys are invalid rows. |
+| `filters[].column` | Canonical column name, required in every input. |
+| `filters[].operator` | `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `notIn`, `contains`, `startsWith`, `endsWith`, `isNull`, `isNotNull`, or `between`. |
+| `filters[].value` | Scalar operand; for `in`, `notIn`, and `between`, it may instead contain the required array. |
+| `filters[].values` | Alternative array operand for `in`, `notIn`, and `between`; never combine it with `value`. |
+| `normalization.emptyEqualsNull` | Default `false`; when true, empty string and blank cells normalize to blank. |
+| `normalization.caseSensitive` | Default `true`; controls string case matching. |
+| `normalization.formulaMode` | `formula`, `cached-result`, or default `formula-and-cached-result`; formulas are never recalculated. |
+| `normalization.columns.<name>.trim` | Trim leading and trailing string whitespace for one canonical column. |
+| `normalization.columns.<name>.caseSensitive` | Override global case handling for one column. |
+| `normalization.columns.<name>.emptyEqualsNull` | Override global blank handling for one column. |
+| `normalization.columns.<name>.numericTolerance` | Non-negative maximum absolute difference when testing two numeric values for equality. |
+| `resources.maxFiles` | Maximum input file count; default `16`. |
+| `resources.maxInputBytes` | Maximum combined input size; default `10737418240`. |
+| `resources.maxRows` | Maximum scanned physical rows across all files; default `10000000`. |
+| `resources.maxCells` | Maximum summed scanned cell count; default `500000000`. |
+| `resources.maxTempBytes` | Maximum combined temporary spool, partition, and repartition-staging bytes; default `53687091200`. |
+| `resources.maxPartitionBytes` | Target maximum partition loaded in memory; default `67108864`. |
+| `resources.maxRuntimeMs` | Maximum comparison duration in milliseconds; default `86400000`. |
+| `output.directory` | Report root directory; must not resolve to an input file. |
+| `output.sampleSize` | Default `20`; maximum detail records the Agent may read when delivering results, not a CSV output limit. |
+
+Filter operand rules: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `contains`, `startsWith`, and `endsWith` require one scalar `value`; `in` and `notIn` require one non-empty array in exactly one of `value` or `values`; `between` requires exactly two values in one of them; `isNull` and `isNotNull` accept neither. Literals are null, string, number, or boolean. Date literals use `YYYY-MM-DD` or timezone-qualified ISO 8601. Ordered comparisons require matching number, string, or date types, and `between` is inclusive.
+
+Mode semantics: `key` aligns rows by typed business keys; `row` aligns by physical row number; `multiset` ignores row order and compares per-file counts of typed selected-value combinations. With `compareColumns: "*"`, every later file must map every baseline header.
+
 ## Safety and reporting
 
 - Never use `eval`, `Function`, temporary JavaScript, or arbitrary SQL to execute user-supplied conditions.

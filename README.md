@@ -59,6 +59,94 @@ excel-diff compare --spec /absolute/path/to/compare.json [--progress] [--keep-te
 }
 ```
 
+### 属性说明
+
+CompareSpec 只允许下表及其子字段；未在 Schema 中声明的字段会导致 `SPEC_INVALID`。`files[].path` 和 `output.directory` 均相对于 `compare.json` 所在目录解析。
+
+| 字段 | 必填 | 类型/取值 | 作用 |
+| --- | --- | --- | --- |
+| `version` | 是 | 固定为 `"1.0"` | CompareSpec 版本。 |
+| `baseline` | 是 | 非空字符串 | 基准文件的 `files[].id`；新增、删除和值变化均相对它判断。 |
+| `files` | 是 | 至少两个对象 | 参与比较的 XLSX 文件；`id` 和解析后的 `path` 都必须唯一。 |
+| `sheet` | 是 | 对象 | 指定所有文件要读取的工作表和表头行。 |
+| `mode` | 是 | `key`、`row` 或 `multiset` | 指定记录如何对齐。 |
+| `compareColumns` | 是 | `"*"` 或非空列名数组 | 指定要比较的列。 |
+| `columnAliases` | 否 | 对象，默认 `{}` | 把不同文件中的别名表头映射到统一列名。 |
+| `filters` | 否 | 数组，默认 `[]` | 比较前过滤数据行；多个过滤条件之间为 AND。 |
+| `normalization` | 否 | 对象 | 配置全局和逐列的值归一化、公式读取方式及数值容差。 |
+| `duplicateKeyPolicy` | 是 | `report` 或 `fail` | `key` 模式发现重复业务键时记录报告或立即失败；Schema 在所有模式下都要求此字段。 |
+| `resources` | 否 | 对象 | 限制输入、扫描、临时磁盘、分区和运行时间；省略时使用默认值。 |
+| `output` | 是 | 对象 | 设置结果根目录和交付时可读取的明细样本数。 |
+
+`files` 与 `sheet`：
+
+| 字段 | 必填 | 类型/约束 | 作用 |
+| --- | --- | --- | --- |
+| `files[].id` | 是 | 非空字符串，唯一 | 文件标识；供 `baseline`、报告列名和错误信息引用。 |
+| `files[].path` | 是 | 非空字符串，扩展名 `.xlsx` | 输入文件路径；相对路径基于 CompareSpec 目录解析。 |
+| `sheet.name` | 是 | 非空字符串 | 所有输入文件中要读取的工作表名称。 |
+| `sheet.headerRow` | 是 | 大于等于 1 的整数 | 表头所在的物理行号；下一行开始作为数据行扫描。 |
+
+`mode` 与比较列：
+
+| 字段/取值 | 作用 |
+| --- | --- |
+| `mode.type: "key"` | 用 `keyColumns` 的有类型值组成业务键，对齐不同文件中的记录。空业务键行记为无效行。 |
+| `mode.keyColumns` | `key` 模式必填的非空、无重复列名数组；键列不会再作为值列比较。 |
+| `mode.type: "row"` | 用工作表物理行号对齐记录，适合行顺序稳定的文件。 |
+| `mode.type: "multiset"` | 忽略行顺序，按所有选中列的有类型值组合统计各文件出现次数。 |
+| `compareColumns: "*"` | 使用基准文件的全部表头；后续文件必须能通过原名、NFKC 规范化名称或别名映射到这些列。 |
+| `compareColumns: ["列A", "列B"]` | 只比较列出的列；数组不能为空且不能包含重复列名。 |
+
+`columnAliases` 的键是统一列名，值是该列可接受的其他表头名称。例如 `{"姓名":["Name","员工姓名"]}`。程序优先使用表头原名，其次使用 NFKC 规范化名称，最后使用别名；一对多或多对一映射无法唯一确定时返回 `COLUMN_MAPPING_AMBIGUOUS`。
+
+过滤条件对象包含以下字段：
+
+| 字段 | 必填 | 作用 |
+| --- | --- | --- |
+| `filters[].column` | 是 | 要过滤的统一列名；该列必须存在于每个输入文件。 |
+| `filters[].operator` | 是 | 过滤操作符，见下表。 |
+| `filters[].value` | 按操作符 | 单个标量；`in`、`notIn`、`between` 也允许用它承载数组。 |
+| `filters[].values` | 按操作符 | `in`、`notIn`、`between` 可使用的数组形式；不能与 `value` 同时出现。 |
+
+| 操作符 | 值要求 | 含义 |
+| --- | --- | --- |
+| `eq` / `ne` | 一个标量 `value` | 等于 / 不等于。 |
+| `gt` / `gte` / `lt` / `lte` | 一个标量 `value` | 同类型数字、字符串或日期的大于 / 大于等于 / 小于 / 小于等于。 |
+| `in` / `notIn` | `value` 或 `values` 中恰好一个非空数组 | 在 / 不在给定集合中。 |
+| `contains` / `startsWith` / `endsWith` | 一个字符串 `value` | 字符串包含 / 以其开头 / 以其结尾。 |
+| `isNull` / `isNotNull` | 不允许 `value` 或 `values` | 为空 / 不为空。 |
+| `between` | `value` 或 `values` 中恰好一个二元素数组 | 闭区间判断，包含上下界。 |
+
+过滤字面量只能是 `null`、字符串、数字或布尔值。日期使用 `YYYY-MM-DD` 或带时区的 ISO 8601 字符串；过滤在键有效性检查和比较之前执行。
+
+归一化配置：
+
+| 字段 | 默认值 | 作用 |
+| --- | --- | --- |
+| `normalization.emptyEqualsNull` | `false` | 为 `true` 时把空字符串 `""` 与空单元格统一为 blank。 |
+| `normalization.caseSensitive` | `true` | 字符串比较是否区分大小写。 |
+| `normalization.formulaMode` | `"formula-and-cached-result"` | `formula` 只比较公式文本；`cached-result` 只比较工作簿缓存值；默认值同时比较两者。公式不会重算。 |
+| `normalization.columns` | `{}` | 以统一列名为键，覆盖该列的归一化规则。 |
+| `normalization.columns.<列>.trim` | 未设置 | 为 `true` 时去除该列字符串首尾空白。 |
+| `normalization.columns.<列>.caseSensitive` | 继承全局值 | 覆盖该列的大小写规则。 |
+| `normalization.columns.<列>.emptyEqualsNull` | 继承全局值 | 覆盖该列的空值规则。 |
+| `normalization.columns.<列>.numericTolerance` | 未设置 | 非负数；比较该列两个数字是否相等时允许的最大绝对误差。 |
+
+资源与输出配置：
+
+| 字段 | 默认值 | 作用 |
+| --- | ---: | --- |
+| `resources.maxFiles` | 16 | 允许参与比较的最大文件数。 |
+| `resources.maxInputBytes` | 10,737,418,240 | 所有输入 XLSX 文件大小之和上限。 |
+| `resources.maxRows` | 10,000,000 | 所有文件扫描物理行数之和上限，包括被过滤和无效的行。 |
+| `resources.maxCells` | 500,000,000 | 所有扫描行的单元格计数之和上限。 |
+| `resources.maxTempBytes` | 53,687,091,200 | 共享字符串 spool、比较分区和重分区 staging 的临时磁盘总上限。 |
+| `resources.maxPartitionBytes` | 67,108,864 | 单个内存加载分区的目标上限；无法继续拆分的超大单键会失败。 |
+| `resources.maxRuntimeMs` | 86,400,000 | 整次比较允许的最长运行时间，单位毫秒。 |
+| `output.directory` | 无，必填 | 结果根目录；相对路径基于 CompareSpec 目录解析，且不能等于输入文件路径。 |
+| `output.sampleSize` | 20 | Agent 交付结果时最多读取的明细记录数；`0` 表示不读取明细示例，不限制产出的完整 CSV。 |
+
 支持三种模式：
 
 - `{"type":"key","keyColumns":["员工编号"]}`：按有类型的业务键比较，键列不再作为值列比较；
