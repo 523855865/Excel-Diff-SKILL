@@ -1,0 +1,5 @@
+{
+  "name": "excel-diff",
+  "version": "0.1.0",
+  "description": "Inspect and compare two or more XLSX workbooks with structured results."
+}
