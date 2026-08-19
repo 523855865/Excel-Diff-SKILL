@@ -4,3 +4,4 @@ node_modules/
 .idea
 graphify-out/*
 docs/
+outputs/
