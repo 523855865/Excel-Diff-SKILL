@@ -23,6 +23,19 @@ async function json(path) {
   return JSON.parse(await readFile(join(root, path), 'utf8'));
 }
 
+test('package metadata and README require Node.js 22 or newer', async () => {
+  const [pkg, lock, readme] = await Promise.all([
+    json('package.json'),
+    json('package-lock.json'),
+    readFile(join(root, 'README.md'), 'utf8')
+  ]);
+
+  assert.equal(pkg.engines.node, '>=22');
+  assert.equal(lock.packages[''].engines.node, '>=22');
+  assert.match(readme, /需要 Node\.js 22 或更高版本/);
+  assert.doesNotMatch(readme, /Node\.js 24|node@24|install 24|use 24|major < 24/);
+});
+
 test('plugin and marketplace metadata match the package and synced skill', async () => {
   const [pkg, plugin, marketplace] = await Promise.all([
     json('package.json'),

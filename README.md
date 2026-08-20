@@ -12,12 +12,12 @@ Agent 必须依次完成：**检查环境 → 搭建缺失环境 → 安装并�
 
 ### 1. 检查环境
 
-需要 Node.js 24 或更高版本以及 npm。macOS/Linux：
+需要 Node.js 22 或更高版本以及 npm。macOS/Linux：
 
 ```sh
 node --version
 npm --version
-node -e 'const major = Number(process.versions.node.split(".")[0]); if (major < 24) { console.error("Node.js 24+ is required"); process.exit(1); }'
+node -e 'const major = Number(process.versions.node.split(".")[0]); if (major < 22) { console.error("Node.js 22+ is required"); process.exit(1); }'
 ```
 
 Windows PowerShell：
@@ -25,16 +25,16 @@ Windows PowerShell：
 ```powershell
 node --version
 npm --version
-node -e 'const major = Number(process.versions.node.split(".")[0]); if (major < 24) { console.error("Node.js 24+ is required"); process.exit(1); }'
+node -e 'const major = Number(process.versions.node.split(".")[0]); if (major < 22) { console.error("Node.js 22+ is required"); process.exit(1); }'
 ```
 
 任一命令不存在或版本检查失败时，先搭建环境。Agent 在安装系统软件前应先取得用户许可，并优先复用机器已有的 Node.js 版本管理器：
 
-| 已有工具 | 安装并启用 Node.js 24 |
+| 已有工具 | 安装并启用 Node.js 22 |
 | --- | --- |
-| `mise` | `mise use --global node@24` |
-| `fnm` | `fnm install 24`，然后执行 `fnm use 24` |
-| `nvm` / nvm-windows | `nvm install 24`，然后执行 `nvm use 24` |
+| `mise` | `mise use --global node@22` |
+| `fnm` | `fnm install 22`，然后执行 `fnm use 22` |
+| `nvm` / nvm-windows | `nvm install 22`，然后执行 `nvm use 22` |
 
 没有版本管理器时，使用 [Node.js 官方安装方式](https://nodejs.org/en/download)。安装后重新执行本节的全部检查，不要绕过 Node.js 版本门禁。
 
