@@ -6,16 +6,15 @@ Excel Diff Skill 用于检查和比较两份或多份 Excel `.xlsx` 文件。Age
 
 Skill 不执行宏、公式或外部链接，也不会重算公式；Agent 不应根据抽样结果擅自推断业务规则。
 
-## Agent 首次安装顺序
+## 环境搭建
 
 Agent 必须依次完成：**检查环境 → 搭建缺失环境 → 安装并验证 CLI → 安装并验证 Codex Skill 和 Claude Code 插件**。CLI 尚不可运行时，不要先安装 Skill。
 
 ### 1. 检查环境
 
-需要 Git、Node.js 24 或更高版本以及 npm。macOS/Linux：
+需要 Node.js 24 或更高版本以及 npm。macOS/Linux：
 
 ```sh
-git --version
 node --version
 npm --version
 node -e 'const major = Number(process.versions.node.split(".")[0]); if (major < 24) { console.error("Node.js 24+ is required"); process.exit(1); }'
@@ -24,7 +23,6 @@ node -e 'const major = Number(process.versions.node.split(".")[0]); if (major < 
 Windows PowerShell：
 
 ```powershell
-git --version
 node --version
 npm --version
 node -e 'const major = Number(process.versions.node.split(".")[0]); if (major < 24) { console.error("Node.js 24+ is required"); process.exit(1); }'
@@ -38,7 +36,7 @@ node -e 'const major = Number(process.versions.node.split(".")[0]); if (major < 
 | `fnm` | `fnm install 24`，然后执行 `fnm use 24` |
 | `nvm` / nvm-windows | `nvm install 24`，然后执行 `nvm use 24` |
 
-没有版本管理器时，使用 [Node.js 官方安装方式](https://nodejs.org/en/download)；缺少 Git 时使用 [Git 官方安装方式](https://git-scm.com/downloads)。安装后重新执行本节的全部检查，不要绕过 Node.js 版本门禁。
+没有版本管理器时，使用 [Node.js 官方安装方式](https://nodejs.org/en/download)。安装后重新执行本节的全部检查，不要绕过 Node.js 版本门禁。
 
 ### 2. 安装并验证 CLI
 
