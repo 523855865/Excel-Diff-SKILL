@@ -1,20 +1,117 @@
 # Excel Diff
 
-要求 Node.js 24，用于流式检查和比较两份或多份 Excel `.xlsx` 文件。
+## Skill 的作用
 
-macOS/Linux：
+Excel Diff Skill 用于检查和比较两份或多份 Excel `.xlsx` 文件。Agent 先检查工作表、表头、类型和候选业务键，向用户确认工作表、业务键、列映射等歧义，再由 CLI 按确认后的 CompareSpec 确定性读取、比较并生成结构化结果与完整报告。
+
+Skill 不执行宏、公式或外部链接，也不会重算公式；Agent 不应根据抽样结果擅自推断业务规则。
+
+## Agent 首次安装顺序
+
+Agent 必须依次完成：**检查环境 → 搭建缺失环境 → 安装并验证 CLI → 安装并验证 Codex Skill 和 Claude Code 插件**。CLI 尚不可运行时，不要先安装 Skill。
+
+### 1. 检查环境
+
+需要 Git、Node.js 24 或更高版本以及 npm。macOS/Linux：
 
 ```sh
-npm ci
-npm install --global .
+git --version
+node --version
+npm --version
+node -e 'const major = Number(process.versions.node.split(".")[0]); if (major < 24) { console.error("Node.js 24+ is required"); process.exit(1); }'
 ```
 
 Windows PowerShell：
 
 ```powershell
+git --version
+node --version
+npm --version
+node -e 'const major = Number(process.versions.node.split(".")[0]); if (major < 24) { console.error("Node.js 24+ is required"); process.exit(1); }'
+```
+
+任一命令不存在或版本检查失败时，先搭建环境。Agent 在安装系统软件前应先取得用户许可，并优先复用机器已有的 Node.js 版本管理器：
+
+| 已有工具 | 安装并启用 Node.js 24 |
+| --- | --- |
+| `mise` | `mise use --global node@24` |
+| `fnm` | `fnm install 24`，然后执行 `fnm use 24` |
+| `nvm` / nvm-windows | `nvm install 24`，然后执行 `nvm use 24` |
+
+没有版本管理器时，使用 [Node.js 官方安装方式](https://nodejs.org/en/download)；缺少 Git 时使用 [Git 官方安装方式](https://git-scm.com/downloads)。安装后重新执行本节的全部检查，不要绕过 Node.js 版本门禁。
+
+### 2. 安装并验证 CLI
+
+在仓库根目录执行：
+
+```sh
 npm ci
+npm test
 npm install --global .
 ```
+
+不要使用 `sudo npm install --global .`；如果全局 npm 目录不可写，应改用用户级 Node.js 版本管理器或用户级 npm prefix。验证命令已进入 PATH：
+
+macOS/Linux：
+
+```sh
+command -v excel-diff
+```
+
+Windows PowerShell：
+
+```powershell
+Get-Command excel-diff
+```
+
+### 3. 安装并验证 Codex Skill
+
+在本仓库或其子目录中启动 Codex 时，Codex 会从 `.agents/skills/excel-diff` 自动发现仓库级 Skill，无需复制文件。
+
+需要在其他仓库中使用时，可将 Skill 安装到用户级 `$HOME/.agents/skills`。先检查目标位置；如果已存在同名 Skill，停止并让用户决定保留、升级或移除，不要直接覆盖。
+
+macOS/Linux：
+
+```sh
+skill_source="$(pwd)/.agents/skills/excel-diff"
+skill_target="${HOME}/.agents/skills/excel-diff"
+test ! -e "$skill_target" || { echo "Skill already exists: $skill_target"; exit 1; }
+mkdir -p "${HOME}/.agents/skills"
+ln -s "$skill_source" "$skill_target"
+test -f "$skill_target/SKILL.md"
+```
+
+Windows PowerShell：
+
+```powershell
+$skillSource = (Resolve-Path ".agents\skills\excel-diff").Path
+$skillRoot = Join-Path $HOME ".agents\skills"
+$skillTarget = Join-Path $skillRoot "excel-diff"
+if (Test-Path $skillTarget) { throw "Skill already exists: $skillTarget" }
+New-Item -ItemType Directory -Force -Path $skillRoot | Out-Null
+New-Item -ItemType Junction -Path $skillTarget -Target $skillSource | Out-Null
+if (-not (Test-Path (Join-Path $skillTarget "SKILL.md"))) { throw "Skill installation failed" }
+```
+
+Codex 通常会自动检测新增 Skill；如果未出现，重启 Codex。使用 `/skills` 查看，或在提示中输入 `$excel-diff` 显式调用。
+
+### 4. 安装并验证 Claude Code 插件
+
+临时加载本地插件并验证：
+
+```sh
+claude --plugin-dir ./plugins/excel-diff
+claude plugin validate ./plugins/excel-diff
+```
+
+也可在 Claude Code 内添加本地仓库路径或远程仓库 URL，再安装插件（本仓库不声明已发布到远程 marketplace）：
+
+```text
+/plugin marketplace add <repo-path-or-url>
+/plugin install excel-diff@excel-diff-tools
+```
+
+安装完成后，让 Claude Code 显示已加载的插件或显式调用 `excel-diff` Skill；若插件未出现，重启 Claude Code 后再检查。
 
 ## Inspect
 
@@ -185,27 +282,13 @@ CompareSpec 只允许下表及其子字段；未在 Schema 中声明的字段会
 npm test
 ```
 
-## Agent 集成
+## Skill 维护
 
-Codex 在仓库内通过 `.agents/skills/excel-diff/SKILL.md` 发现此 Skill；唯一维护源是 `skill/SKILL.md`。修改后同步并检查副本：
+Skill 的唯一维护源是 `skill/SKILL.md`。修改后同步并检查 Codex 与 Claude Code 的副本：
 
 ```sh
 node scripts/sync-skills.mjs
 node scripts/sync-skills.mjs --check
-```
-
-Claude Code 开发时可直接加载本地插件：
-
-```sh
-claude --plugin-dir ./plugins/excel-diff
-claude plugin validate ./plugins/excel-diff
-```
-
-也可在 Claude Code 内添加本地仓库路径或远程仓库 URL，再安装插件（本仓库不声明已发布到远程 marketplace）：
-
-```text
-/plugin marketplace add <repo-path-or-url>
-/plugin install excel-diff@excel-diff-tools
 ```
 
 | 退出码 | 含义 |
